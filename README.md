@@ -23,15 +23,15 @@ Chat Cat 只做一件事：**额度是你自己的，体验还是官方的。**
 
 ## 截图
 
-<table>
-  <tr>
-    <td align="center"><img src="screenshots/01-idle.png" width="180"><br><sub>打开就能聊，橘狮在等你</sub></td>
-    <td align="center"><img src="screenshots/02-connect.png" width="180"><br><sub>三步接入，入口直接跳官网</sub></td>
-    <td align="center"><img src="screenshots/03-chat.png" width="180"><br><sub>公式、代码、操作栏都是官方的样子</sub></td>
-    <td align="center"><img src="screenshots/04-sessions.png" width="180"><br><sub>会话按置顶 / 今天 / 昨天分组</sub></td>
-    <td align="center"><img src="screenshots/05-import.png" width="180"><br><sub>从官方导出，回来自动接手</sub></td>
-  </tr>
-</table>
+| 待机：橘狮在等你 | 接入：充值 / 建 Key / 粘贴 | 对话：公式、代码、操作栏 |
+| :---: | :---: | :---: |
+| [![待机页](screenshots/thumbs/01-idle.png)](screenshots/01-idle.png) | [![接入页](screenshots/thumbs/02-connect.png)](screenshots/02-connect.png) | [![对话页](screenshots/thumbs/03-chat.png)](screenshots/03-chat.png) |
+
+| 会话：置顶 / 今天 / 昨天 | 搬家：官方导出，回来自动接手 |
+| :---: | :---: |
+| [![会话列表](screenshots/thumbs/04-sessions.png)](screenshots/04-sessions.png) | [![导入引导](screenshots/thumbs/05-import.png)](screenshots/05-import.png) |
+
+> 点图可看原尺寸。
 
 ## 手感：照着官方 App 做，不是照着 API 文档做
 
@@ -138,7 +138,7 @@ Chat Cat：从 DeepSeek 全量导入历史数据
 
 诚实列一下，免得装完才发现：
 
-| | 情况 |
+| 能力 | 情况 |
 | --- | --- |
 | 语音 | **没有**。语音通话、语音输入暂未实现，输入框的按住说话是沿用官方的占位文案 |
 | 工具箱 | 没有官方的那些小工具入口，能力集中在对话本身 |
