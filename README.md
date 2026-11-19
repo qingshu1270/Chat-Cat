@@ -179,7 +179,7 @@ Chat Cat：从 DeepSeek 全量导入历史数据
 
 国内网络已默认走阿里云 Maven 与腾讯 Gradle 镜像。打包正式版需要自己的 keystore，参考 `keystore.properties.example`。
 
-设计与实现文档在 [docs/](docs/)，变更记录在 [CHANGELOG.md](CHANGELOG.md)。
+设计与实现文档在 [docs/](docs/)，变更记录在 [CHANGELOG.md](CHANGELOG.md)。想参与贡献看 [CONTRIBUTING.md](CONTRIBUTING.md)；发现安全问题请按 [SECURITY.md](SECURITY.md) 私下告诉我，别先开公开 issue。
 
 ## 许可与声明
 
