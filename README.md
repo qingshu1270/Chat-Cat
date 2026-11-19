@@ -23,7 +23,7 @@ Chat Cat 只做一件事：**额度是你自己的，体验还是官方的。**
 
 ## 截图
 
-![Chat Cat 界面一览](screenshots/overview.png)
+![Chat Cat 界面一览](screenshots/ui-overview.png)
 
 *从左到右：待机页（橘狮）、三步接入、对话与公式代码、会话分组、从官方导入。原尺寸见 [screenshots/](screenshots/)。*
 
