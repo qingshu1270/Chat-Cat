@@ -23,15 +23,9 @@ Chat Cat 只做一件事：**额度是你自己的，体验还是官方的。**
 
 ## 截图
 
-| 待机：橘狮在等你 | 接入：充值 / 建 Key / 粘贴 | 对话：公式、代码、操作栏 |
-| :---: | :---: | :---: |
-| [![待机页](screenshots/thumbs/01-idle.png)](screenshots/01-idle.png) | [![接入页](screenshots/thumbs/02-connect.png)](screenshots/02-connect.png) | [![对话页](screenshots/thumbs/03-chat.png)](screenshots/03-chat.png) |
+![Chat Cat 界面一览](screenshots/overview.png)
 
-| 会话：置顶 / 今天 / 昨天 | 搬家：官方导出，回来自动接手 |
-| :---: | :---: |
-| [![会话列表](screenshots/thumbs/04-sessions.png)](screenshots/04-sessions.png) | [![导入引导](screenshots/thumbs/05-import.png)](screenshots/05-import.png) |
-
-> 点图可看原尺寸。
+*从左到右：待机页（橘狮）、三步接入、对话与公式代码、会话分组、从官方导入。原尺寸见 [screenshots/](screenshots/)。*
 
 ## 手感：照着官方 App 做，不是照着 API 文档做
 
