@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 拍照结果先落到 cache/images，再按附件上传 -->
+    <cache-path name="images" path="images/" />
+</paths>

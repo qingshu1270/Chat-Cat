@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Chat Cat</string>
+    <!-- beta（debug）包专用名称，避免与正式版在桌面/应用列表里混淆 -->
+    <string name="app_name_beta">Chat Cat Beta</string>
+</resources>

@@ -1,0 +1,2 @@
+# 复制为 local.properties，指向本机 Android SDK（本文件不会被提交）
+sdk.dir=/path/to/Android/Sdk

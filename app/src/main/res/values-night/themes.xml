@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ChatCat" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#151517</item>
+        <item name="android:statusBarColor">#151517</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">#151517</item>
+    </style>
+</resources>
