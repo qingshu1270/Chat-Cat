@@ -8,12 +8,14 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -43,6 +45,10 @@ data class AppSettings(
     val balanceWarn: Float = DEFAULT_BALANCE_WARN,
     /** 已同意的用户协议版本；小于当前版本时需要重新确认 */
     val termsVersion: Int = 0,
+    /** 法定节假日（逗号分隔的 yyyy-MM-dd），来自在线数据源，本地缓存 */
+    val holidayDates: String = "",
+    /** 上次拉取节假日数据的时间（毫秒） */
+    val holidayFetchedAt: Long = 0L,
 ) {
     companion object {
         const val DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -110,46 +116,43 @@ class SettingsStore(private val context: Context) {
     @Volatile
     private var cache: List<ApiKeyEntry>? = null
 
-    val settings: Flow<AppSettings> = context.settingsDataStore.data.map { p ->
-        AppSettings(
-            baseUrl = p[KEY_BASE_URL] ?: AppSettings.DEFAULT_BASE_URL,
-            model = p[KEY_MODEL] ?: AppSettings.DEFAULT_MODEL,
-            thinking = p[KEY_THINKING] ?: true,
-            search = p[KEY_SEARCH] ?: false,
-            thinkingDisplay = p[KEY_THINKING_DISPLAY]
-                ?: if (p[KEY_AUTO_COLLAPSE] == false) AppSettings.THINKING_FULL else AppSettings.THINKING_LIMITED,
-            lastSessionId = p[KEY_LAST_SESSION],
-            theme = p[KEY_THEME] ?: "system",
-            displayName = p[KEY_DISPLAY_NAME].orEmpty(),
-            fontScale = p[KEY_FONT_SCALE] ?: 1.0f,
-            balanceWarn = p[KEY_BALANCE_WARN] ?: AppSettings.DEFAULT_BALANCE_WARN,
-            termsVersion = p[KEY_TERMS_VERSION] ?: 0,
-        )
-    }
+    val settings: Flow<AppSettings> = context.settingsDataStore.data.map { it.toSettings() }
+
+    /**
+     * 唯一的「Preferences → AppSettings」映射，读与写共用。
+     * 之前 [update] 里另手写了一份，字段一多就容易漂：漏掉的字段会被按默认值写回去。
+     */
+    private fun Preferences.toSettings(): AppSettings = AppSettings(
+        baseUrl = this[KEY_BASE_URL] ?: AppSettings.DEFAULT_BASE_URL,
+        model = this[KEY_MODEL] ?: AppSettings.DEFAULT_MODEL,
+        thinking = this[KEY_THINKING] ?: true,
+        search = this[KEY_SEARCH] ?: false,
+        thinkingDisplay = this[KEY_THINKING_DISPLAY]
+            ?: if (this[KEY_AUTO_COLLAPSE] == false) AppSettings.THINKING_FULL else AppSettings.THINKING_LIMITED,
+        lastSessionId = this[KEY_LAST_SESSION],
+        theme = this[KEY_THEME] ?: "system",
+        displayName = this[KEY_DISPLAY_NAME].orEmpty(),
+        fontScale = this[KEY_FONT_SCALE] ?: 1.0f,
+        balanceWarn = this[KEY_BALANCE_WARN] ?: AppSettings.DEFAULT_BALANCE_WARN,
+        termsVersion = this[KEY_TERMS_VERSION] ?: 0,
+        holidayDates = this[KEY_HOLIDAY_DATES] ?: "",
+        holidayFetchedAt = this[KEY_HOLIDAY_FETCHED_AT] ?: 0L,
+    )
+
+    /** 一次性读取当前设置快照（用于启动时同步缓存类数据） */
+    suspend fun snapshot(): AppSettings = settings.first()
 
     suspend fun update(block: (AppSettings) -> AppSettings) {
         context.settingsDataStore.edit { p ->
-            val current = AppSettings(
-                baseUrl = p[KEY_BASE_URL] ?: AppSettings.DEFAULT_BASE_URL,
-                model = p[KEY_MODEL] ?: AppSettings.DEFAULT_MODEL,
-                thinking = p[KEY_THINKING] ?: true,
-                search = p[KEY_SEARCH] ?: false,
-                thinkingDisplay = p[KEY_THINKING_DISPLAY]
-                    ?: if (p[KEY_AUTO_COLLAPSE] == false) AppSettings.THINKING_FULL else AppSettings.THINKING_LIMITED,
-                lastSessionId = p[KEY_LAST_SESSION],
-                theme = p[KEY_THEME] ?: "system",
-                displayName = p[KEY_DISPLAY_NAME].orEmpty(),
-                fontScale = p[KEY_FONT_SCALE] ?: 1.0f,
-                balanceWarn = p[KEY_BALANCE_WARN] ?: AppSettings.DEFAULT_BALANCE_WARN,
-                termsVersion = p[KEY_TERMS_VERSION] ?: 0,
-            )
-            val next = block(current)
+            val next = block(p.toSettings())
             p[KEY_BASE_URL] = next.baseUrl
             p[KEY_MODEL] = next.model
             p[KEY_THINKING] = next.thinking
             p[KEY_SEARCH] = next.search
             p[KEY_THINKING_DISPLAY] = next.thinkingDisplay
             p[KEY_TERMS_VERSION] = next.termsVersion
+            p[KEY_HOLIDAY_DATES] = next.holidayDates
+            p[KEY_HOLIDAY_FETCHED_AT] = next.holidayFetchedAt
             p[KEY_THEME] = next.theme
             p[KEY_DISPLAY_NAME] = next.displayName
             p[KEY_FONT_SCALE] = next.fontScale
@@ -288,6 +291,8 @@ class SettingsStore(private val context: Context) {
         val KEY_AUTO_COLLAPSE = booleanPreferencesKey("auto_collapse_thinking")
         val KEY_THINKING_DISPLAY = stringPreferencesKey("thinking_display")
         val KEY_TERMS_VERSION = intPreferencesKey("terms_version")
+        val KEY_HOLIDAY_DATES = stringPreferencesKey("holiday_dates")
+        val KEY_HOLIDAY_FETCHED_AT = longPreferencesKey("holiday_fetched_at")
         val KEY_LAST_SESSION = stringPreferencesKey("last_session")
         val KEY_THEME = stringPreferencesKey("theme")
         val KEY_DISPLAY_NAME = stringPreferencesKey("display_name")

@@ -158,6 +158,7 @@ import com.chatcat.domain.model.UiMessage
 import com.chatcat.ui.components.AttachmentImage
 import com.chatcat.ui.components.MarkdownText
 import com.chatcat.ui.components.rememberUriImage
+import com.chatcat.ui.common.PeakValleyTag
 import com.chatcat.ui.common.customTabUriHandler
 import com.chatcat.ui.components.SecondaryPage
 import com.chatcat.ui.theme.LocalDarkTheme
@@ -1686,33 +1687,28 @@ private fun VersionSwitcher(message: UiMessage, onSwitchVersion: (String, Int) -
 
 @Composable
 private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDisplay: String) {
-    // 默认收起模式下不展开；其它模式进来就是展开的
-    var expanded by rememberSaveable(message.id) {
-        mutableStateOf(thinkingDisplay != AppSettings.THINKING_COLLAPSED)
-    }
-    var userToggled by rememberSaveable(message.id) { mutableStateOf(false) }
+    // 用户手动点过就以手动为准；没点过则按模式自动决定（chat-demo 的基本逻辑）
+    var userExpanded by rememberSaveable(message.id) { mutableStateOf<Boolean?>(null) }
     var tick by remember { mutableLongStateOf(0L) }
-    var endedAt by rememberSaveable(message.id) { mutableLongStateOf(0L) }
-    val scroll = rememberScrollState()
 
-    // 正在思考 + 用户没手动干预（且不是「展开全部」）：用限高区域流式滚动，贴近官方体感
-    val limited = thinkingActive &&
-        !userToggled &&
-        thinkingDisplay != AppSettings.THINKING_FULL
+    // 思考中：除「默认收起」外都展开；结束后：除「默认展开」外都收起。
+    // 一旦用户手动展开/收起，就固定住，不再被自动规则覆盖（这正是旧实现会「弹回收起」的原因）。
+    val autoExpanded = if (thinkingActive) {
+        thinkingDisplay != AppSettings.THINKING_COLLAPSED
+    } else {
+        thinkingDisplay == AppSettings.THINKING_FULL
+    }
+    val expanded = userExpanded ?: autoExpanded
+
+    val scroll = rememberScrollState()
+    // 思考进行中始终是限高滚动；「默认展开」模式下不限高
+    val limited = thinkingActive && thinkingDisplay != AppSettings.THINKING_FULL
 
     LaunchedEffect(thinkingActive) {
         if (thinkingActive) {
-            endedAt = 0L
             while (true) {
                 tick = System.currentTimeMillis()
                 delay(500)
-            }
-        } else {
-            endedAt = System.currentTimeMillis()
-            // 手动展开/收起后不再自动折叠；只有「限高展开」模式结束后自动收起
-            if (!userToggled && thinkingDisplay == AppSettings.THINKING_LIMITED) {
-                delay(900)
-                expanded = false
             }
         }
     }
@@ -1729,7 +1725,6 @@ private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDis
             val now = tick.takeIf { it > 0 } ?: System.currentTimeMillis()
             ((now - message.createdAt) / 1000).coerceAtLeast(1)
         }
-        endedAt > message.createdAt -> ((endedAt - message.createdAt) / 1000).coerceAtLeast(1)
         else -> 1L
     }
 
@@ -1740,10 +1735,7 @@ private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDis
         Row(
             Modifier
                 .clip(RoundedCornerShape(12.dp))
-                .clickable {
-                    userToggled = true
-                    expanded = !expanded
-                }
+                .clickable { userExpanded = !expanded }
                 .padding(vertical = 4.dp, horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1883,6 +1875,12 @@ private fun ToolGroupStep(blocks: List<UiBlock>) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),
         )
+        // 参考官方：胶囊后面叠几个来源站点的小圆标
+        val iconSources = sources.ifEmpty { fetches.mapNotNull { f -> f.url?.let { ToolSource(title = f.title ?: it, url = it) } } }
+        if (iconSources.isNotEmpty()) {
+            Spacer(Modifier.width(6.dp))
+            SiteIconStack(iconSources)
+        }
         if (openAction != null) {
             Icon(
                 Icons.Outlined.KeyboardArrowRight,
@@ -1890,6 +1888,42 @@ private fun ToolGroupStep(blocks: List<UiBlock>) {
                 modifier = Modifier.size(14.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/** 来源站点小圆标：最多叠三个，颜色由域名决定，便于一眼看出搜了哪些站 */
+@Composable
+private fun SiteIconStack(sources: List<ToolSource>) {
+    val palette = listOf(
+        Color(0xFF4F8DF7), Color(0xFF34A853), Color(0xFFF2994A),
+        Color(0xFF9B51E0), Color(0xFFEB5757), Color(0xFF2D9CDB),
+    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        // 负间距实现叠压；不要用负 padding，Compose 会抛 IllegalArgumentException
+        horizontalArrangement = Arrangement.spacedBy((-5).dp),
+    ) {
+        sources.take(3).forEach { source ->
+            val host = runCatching { java.net.URI(source.url).host }.getOrNull()
+                ?.removePrefix("www.").orEmpty()
+            val letter = (source.siteName?.takeIf { it.isNotBlank() } ?: host)
+                .take(1).uppercase().ifBlank { "?" }
+            val color = palette[(host.hashCode().let { if (it < 0) -it else it }) % palette.size]
+            Box(
+                Modifier
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(color)
+                    .border(1.dp, MaterialTheme.colorScheme.background, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = letter,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                    color = Color.White,
+                )
+            }
         }
     }
 }
@@ -2082,26 +2116,14 @@ private fun Composer(
                 }
             }
         }
-        if (balanceYuan == null) {
-            if (!showDisclaimer) return@Column
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "内容由 AI 生成，仅供参考，请勿用于违法用途",
-                modifier = Modifier.fillMaxWidth(),
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                color = Tokens.Placeholder.copy(alpha = 0.8f),
-                textAlign = TextAlign.Center,
-            )
-            return@Column
-        }
-
-        // 左下角常显余额：与免责声明同一行，低于预警线时用醒目提示色
+        // 左下角常显：余额（未知时显示「--」）+ 峰谷标记。
+        // 之前余额为空时整块一起不渲染，看起来就像「换个主题小字就没了」——真正取决于有没有余额数据。
         Spacer(Modifier.height(6.dp))
-        val low = balanceYuan < balanceWarn
+        val low = balanceYuan != null && balanceYuan < balanceWarn
         Box(Modifier.fillMaxWidth()) {
             if (showDisclaimer) {
                 Text(
-                    text = "内容由 AI 生成，仅供参考，请勿用于违法用途",
+                    text = "内容由 AI 生成，仅供参考",
                     modifier = Modifier.fillMaxWidth(),
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                     color = Tokens.Placeholder.copy(alpha = 0.8f),
@@ -2117,13 +2139,16 @@ private fun Composer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "余额 ¥${String.format("%.2f", balanceYuan)}",
+                    text = balanceYuan?.let { "余额 ¥${String.format("%.2f", it)}" } ?: "余额 --",
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontSize = 11.sp,
                         fontWeight = if (low) FontWeight.SemiBold else FontWeight.Normal,
                     ),
                     color = if (low) MaterialTheme.colorScheme.error else Tokens.Placeholder,
                 )
+                Spacer(Modifier.width(4.dp))
+                // 峰时段红色「峰」，谷时段绿色「谷」
+                PeakValleyTag()
             }
         }
     }
@@ -2635,7 +2660,7 @@ private fun EditComposer(
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "内容由 AI 生成，仅供参考，请勿用于违法用途",
+            text = "内容由 AI 生成，仅供参考",
             modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
             color = Tokens.Placeholder.copy(alpha = 0.8f),

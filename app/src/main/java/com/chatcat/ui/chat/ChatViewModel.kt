@@ -1,6 +1,7 @@
 package com.chatcat.ui.chat
 
 import android.app.Application
+import android.database.sqlite.SQLiteFullException
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
@@ -12,6 +13,7 @@ import androidx.lifecycle.viewModelScope
 import com.chatcat.AppContainer
 import com.chatcat.data.archive.ImportMode
 import com.chatcat.data.archive.ImportPreview
+import com.chatcat.data.archive.ImportCache
 import com.chatcat.data.archive.ImportResult
 import com.chatcat.data.prefs.AppSettings
 import com.chatcat.data.remote.ApiException
@@ -28,6 +30,7 @@ import com.chatcat.domain.model.ContinuePolicy
 import com.chatcat.domain.model.BlockType
 import com.chatcat.domain.model.ExportLinkParser
 import com.chatcat.domain.model.MessageStatus
+import com.chatcat.domain.model.PeakValley
 import com.chatcat.domain.model.Role
 import com.chatcat.domain.model.SessionSummary
 import com.chatcat.security.SensitiveAction
@@ -138,6 +141,10 @@ data class ChatUiState(
     val draft: Boolean = true,
     /** 归档导入/导出进行中 */
     val archiving: Boolean = false,
+    /** 导入进度：已处理会话数；-1 表示当前没有导入任务 */
+    val importProgress: Int = -1,
+    /** 本次导入预计的会话数（取自预览），用于显示分母 */
+    val importTotal: Int = 0,
     val archiveNotice: String? = null,
     /** 选中备份文件后的预览，非空时进入导入确认页 */
     val importPreview: ImportPreview? = null,
@@ -239,6 +246,16 @@ class ChatViewModel(
     private val uploadSlots = Semaphore(3)
 
     init {
+        // 节假日：先用本地缓存，再在后台按 12 小时节流刷新（失败保留旧数据）
+        viewModelScope.launch {
+            runCatching {
+                val cached = container.holidays.cached()
+                if (cached.isNotEmpty()) PeakValley.setHolidays(cached)
+                val latest = container.holidays.ensureFresh()
+                if (latest.isNotEmpty()) PeakValley.setHolidays(latest)
+            }
+        }
+
         // 启动时读取已保存的 Key：无论有无 Key 都直接到对话页，提示条据 hasKey 显示
         refreshKeyState()
         // 低频余额同步（5 分钟一次）：启动先取一次，之后定时；失败静默
@@ -556,8 +573,7 @@ class ChatViewModel(
                     importGuideOpen = if (result.isSuccess) false else it.importGuideOpen,
                     linkStage = if (result.isSuccess) LinkImportStage.IDLE else it.linkStage,
                     linkPrompt = null,
-                    archiveNotice = result.exceptionOrNull()
-                        ?.let { "无法读取备份：请确认是官方导出的 ZIP" },
+                    archiveNotice = result.exceptionOrNull()?.let { archiveFailureText(it, preview = true) },
                 )
             }
         }
@@ -576,9 +592,23 @@ class ChatViewModel(
         if (_state.value.archiving) return
         viewModelScope.launch {
             val preview = _state.value.importPreview
-            _state.update { it.copy(archiving = true, archiveNotice = null) }
+            _state.update {
+                it.copy(
+                    archiving = true,
+                    archiveNotice = null,
+                    importProgress = 0,
+                    importTotal = preview?.sessionCount ?: 0,
+                )
+            }
             val result = runCatching {
-                container.archive.import(getApplication<Application>().contentResolver, uri, mode)
+                container.archive.import(
+                    resolver = getApplication<Application>().contentResolver,
+                    uri = uri,
+                    mode = mode,
+                    onProgress = { done ->
+                        _state.update { it.copy(importProgress = done) }
+                    },
+                )
             }
             result.onFailure { Log.w("ChatCat", "import archive failed", it) }
 
@@ -599,6 +629,8 @@ class ChatViewModel(
                 _state.update {
                     it.copy(
                         archiving = false,
+                        importProgress = -1,
+                        importTotal = 0,
                         importPreview = null,
                         sessionId = null,
                         messages = emptyList(),
@@ -618,14 +650,36 @@ class ChatViewModel(
                 _state.update {
                     it.copy(
                         archiving = false,
+                        importProgress = -1,
+                        importTotal = 0,
                         importPreview = null,
-                        archiveNotice = "导入失败，请确认是官方导出的 ZIP",
+                        archiveNotice = archiveFailureText(result.exceptionOrNull(), preview = false),
                         linkStage = if (it.importGuideOpen) LinkImportStage.FAILED else it.linkStage,
-                        linkError = if (it.importGuideOpen) "导入失败：导出包可能不完整，请重试" else it.linkError,
+                        linkError = if (it.importGuideOpen) {
+                            archiveFailureText(result.exceptionOrNull(), preview = false)
+                        } else {
+                            it.linkError
+                        },
                     )
                 }
             }
         }
+    }
+
+    /**
+     * 导入/预览失败文案。
+     *
+     * `OutOfMemoryError` 说明包体超出了当前设备的可用堆（旧实现把整包读进内存时会这样，
+     * 严重时进程直接被系统杀掉，表现为闪退），这里给一条能指导操作的提示，而不是「不是 ZIP」。
+     */
+    private fun archiveFailureText(error: Throwable?, preview: Boolean): String = when {
+        error is OutOfMemoryError ->
+            "备份过大，设备内存不足：请分批导入（先导入一部分再导入其余），或换用内存更大的设备"
+        error is SQLiteFullException ||
+            error?.message?.contains("disk is full", ignoreCase = true) == true ->
+            "设备存储空间不足：请清理空间后重试；已导入的对话会保留，重新导入即可补全"
+        preview -> "无法读取备份：请确认是官方导出的 ZIP"
+        else -> "导入失败，请确认是官方导出的 ZIP"
     }
 
     /** 导入结果文案：区分合并与覆盖，并说明跳过了多少已存在的对话 */
@@ -682,6 +736,11 @@ class ChatViewModel(
         clipboardJob = null
         linkImportJob?.cancel()
         linkImportJob = null
+        // 退出导入页就把下载的导出包删掉：此前只删「取消/成功」两条路径，
+        // 直接返回或从后台划掉应用时，上百 MB 的包会一直留在私有目录里
+        pendingLinkFile?.delete()
+        pendingLinkFile = null
+        pendingImportUri = null
         _state.update {
             it.copy(
                 importGuideOpen = false,
@@ -850,6 +909,8 @@ class ChatViewModel(
         linkImportJob = viewModelScope.launch {
             val app = getApplication<Application>()
             val cache = File(app.cacheDir, "deepseek_import_${System.currentTimeMillis()}.zip")
+            // 先清掉更早的失败残留，避免多份大包叠在缓存里
+            runCatching { ImportCache.sweepAll(app.cacheDir, keep = pendingLinkFile) }
             _state.update {
                 it.copy(linkStage = LinkImportStage.DOWNLOADING, downloadProgress = 0f, linkError = null)
             }
@@ -901,6 +962,27 @@ class ChatViewModel(
         DownloadFailure.NOT_ARCHIVE -> "该链接不是导出压缩包，请确认复制的是「下载链接」"
         DownloadFailure.NETWORK -> "网络异常，下载中断，请重试或改为上传 ZIP 文件"
         DownloadFailure.UNAVAILABLE -> "下载服务暂时不可用，请稍后重试或改为上传 ZIP 文件"
+    }
+
+    /**
+     * 手动清理导入缓存（数据管理页），返回释放的字节数并给出提示。
+     * 正常情况下启动时已经自动清过一次，这里是给用户的兜底入口。
+     */
+    fun clearImportCache() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val freed = runCatching { ImportCache.sweepAll(app.cacheDir) }.getOrDefault(0L)
+            Log.w("ChatCat", "clear import cache freed=$freed")
+            _state.update {
+                it.copy(
+                    archiveNotice = if (freed > 0) {
+                        "已清理导入缓存 ${ImportCache.formatSize(freed)}"
+                    } else {
+                        "没有需要清理的导入缓存"
+                    },
+                )
+            }
+        }
     }
 
     fun clearArchiveNotice() {
@@ -1639,11 +1721,11 @@ class ChatViewModel(
                         }
 
                         is StreamEvent.Finished -> {
-                            val status = if (event.stopReason == "refusal") {
-                                MessageStatus.REFUSED
-                            } else {
-                                MessageStatus.DONE
-                            }
+                            // 不同协议/版本可能用 refusal / content_filter / blocked 表达拒答
+                            val refused = event.stopReason?.lowercase() in setOf(
+                                "refusal", "content_filter", "blocked", "safety",
+                            )
+                            val status = if (refused) MessageStatus.REFUSED else MessageStatus.DONE
                             // 用量以最后一次 message_delta 为准（docs 02 §12），不与 start 相加
                             val u = event.usage
                             if (u != null && assistantId != null) {

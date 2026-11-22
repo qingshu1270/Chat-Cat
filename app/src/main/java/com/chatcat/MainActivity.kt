@@ -164,6 +164,8 @@ class MainActivity : ComponentActivity() {
                     showSettings -> SettingsScreen(
                         settings = state.settings,
                         archiving = state.archiving,
+                        importProgress = state.importProgress,
+                        importTotal = state.importTotal,
                         archiveNotice = state.archiveNotice,
                         importPreview = state.importPreview,
                         usageOverviewOpen = state.usageOverviewOpen,
@@ -181,6 +183,7 @@ class MainActivity : ComponentActivity() {
                         onClearSessions = viewModel::clearAllSessions,
                         onExport = viewModel::exportArchive,
                         onImport = viewModel::inspectArchive,
+                        onClearImportCache = viewModel::clearImportCache,
                         onConfirmImport = viewModel::confirmImport,
                         onCancelImport = viewModel::cancelImport,
                         onBaseUrl = viewModel::setBaseUrl,

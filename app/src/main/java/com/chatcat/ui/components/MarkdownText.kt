@@ -138,13 +138,15 @@ private fun MarkdownBlocks(
 ) {
     val blocks = remember(markdown) { parseBlocks(markdown) }
     val codeColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val citeBg = MaterialTheme.colorScheme.surfaceVariant
+    val citeColor = MaterialTheme.colorScheme.onSurfaceVariant
     Column {
         blocks.forEach { block ->
             when (block) {
                 is Block.Heading -> {
                     Spacer(Modifier.height((if (block.level == 1) 14.dp else 10.dp) * gap))
                     Text(
-                        text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor),
+                        text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
                         style = if (compact) {
                             bodyStyle.copy(fontSize = bodyStyle.fontSize * 1.05f, fontWeight = FontWeight.SemiBold)
                         } else {
@@ -169,7 +171,7 @@ private fun MarkdownBlocks(
 
                 is Block.Paragraph -> {
                     Text(
-                        text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor),
+                        text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
                         style = bodyStyle,
                         color = textColor,
                     )
@@ -187,7 +189,7 @@ private fun MarkdownBlocks(
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor),
+                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
                             style = bodyStyle,
                             color = textColor,
                         )
@@ -204,7 +206,7 @@ private fun MarkdownBlocks(
                             color = textColor,
                         )
                         Text(
-                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor),
+                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
                             style = bodyStyle,
                             color = textColor,
                         )
@@ -238,7 +240,7 @@ private fun MarkdownBlocks(
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor),
+                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
                             style = bodyStyle,
                             color = textColor.copy(alpha = 0.75f),
                         )
@@ -317,6 +319,8 @@ private fun TableRow(
                         cells.getOrNull(column).orEmpty(),
                         MaterialTheme.colorScheme.primary,
                         codeColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        citeBg = MaterialTheme.colorScheme.surfaceVariant,
+                        citeColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     ),
                     fontSize = 14.sp,
                     lineHeight = 20.sp,
@@ -511,6 +515,8 @@ private fun inline(
     linkColor: Color,
     linksClickable: Boolean = true,
     codeColor: Color = Color.Unspecified,
+    citeBg: Color = Color.Unspecified,
+    citeColor: Color = Color.Unspecified,
 ): AnnotatedString =
     buildAnnotatedString {
         // 行内公式：$...$ 或 \(...\)，转成 Unicode 近似后仍当作普通文本参与换行
@@ -542,16 +548,23 @@ private fun inline(
                 m.groupValues[3].isNotEmpty() -> {
                     val label = m.groupValues[3]
                     val url = m.groupValues[4]
-                    val citation = label.all { ch -> ch in "⁰¹²³⁴⁵⁶⁷⁸⁹" }
-                    val style = SpanStyle(
-                        color = if (citation) Tokens.GrayText else linkColor,
-                        fontSize = if (citation) 12.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
-                    )
+                    // 纯数字的链接按「引用角标」处理：灰底小方块里放序号，和官方观感一致
+                    val citation = label.all { it.isDigit() } && label.isNotBlank()
+                    val style = if (citation) {
+                        SpanStyle(
+                            color = if (citeColor != Color.Unspecified) citeColor else Tokens.GrayText,
+                            background = if (citeBg != Color.Unspecified) citeBg
+                            else Color(0x14000000),
+                            fontSize = 11.sp,
+                        )
+                    } else {
+                        SpanStyle(color = linkColor)
+                    }
                     if (linksClickable) {
-                        withLink(LinkAnnotation.Url(url)) { withStyle(style) { append(label) } }
+                        withLink(LinkAnnotation.Url(url)) { withStyle(style) { append(" $label ") } }
                     } else {
                         // 正文保护：链接只是着色文字，点击不会跳转
-                        withStyle(style) { append(label) }
+                        withStyle(style) { append(" $label ") }
                     }
                 }
             }
@@ -583,11 +596,11 @@ internal fun normalizeCitations(text: String, sources: List<ToolSource>): String
     val numbered = citationLink.replace(text) { m ->
         val url = m.groupValues[2]
         val number = order.getOrPut(url) { next++ }
-        "[${superscriptOf(number)}]($url)"
+        "[$number]($url)"
     }
 
     // 行首连续角标 → 移到行尾，避免打断标题/列表
-    val leading = Regex("^((?:\\[[¹²³⁴⁵⁶⁷⁸⁹]+]\\([^)\\s]+\\)\\s*)+)")
+    val leading = Regex("^((?:\\[[0-9]+]\\([^)\\s]+\\)\\s*)+)")
     return numbered.split('\n').joinToString("\n") { line ->
         val match = leading.find(line)
         if (match == null) {

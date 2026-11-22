@@ -90,21 +90,13 @@ data class UiMessage(
                     .distinctBy { it.first }
                     .sortedBy { it.first }
                     .joinToString("") { (number, url) ->
-                        // 上标渲染为 markdown 链接，点按直接用浏览器打开来源
-                        "[${superscript(number)}]($url)"
+                        // 渲染成灰底数字角标（官方样式），点按打开来源
+                        "[$number]($url)"
                     }
                 block.text + marks
             }
         }
 
-    private fun superscript(value: Int): String =
-        value.toString().map { ch ->
-            when (ch) {
-                '0' -> '⁰'; '1' -> '¹'; '2' -> '²'; '3' -> '³'; '4' -> '⁴'
-                '5' -> '⁵'; '6' -> '⁶'; '7' -> '⁷'; '8' -> '⁸'; '9' -> '⁹'
-                else -> ch
-            }
-        }.joinToString("")
 
     /** 官方：有版本切换器时多一条操作栏 */
     val hasVersions: Boolean get() = versionCount > 1

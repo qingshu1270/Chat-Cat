@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,6 +46,8 @@ import com.chatcat.R
 import com.chatcat.data.remote.BalanceInfo
 import com.chatcat.ui.common.OfficialLinks
 import com.chatcat.ui.common.openUrl
+import com.chatcat.domain.model.PeakValley
+import com.chatcat.ui.common.rememberTickingNow
 import com.chatcat.ui.components.SecondaryPage
 import kotlin.math.roundToInt
 import kotlin.random.Random
@@ -141,6 +144,9 @@ fun BalanceScreen(
         Spacer(Modifier.height(18.dp))
         WarnLineCard(warn = warn, onChange = onWarnChange)
 
+        Spacer(Modifier.height(12.dp))
+        PeakValleyCard()
+
         if (info != null) {
             Spacer(Modifier.height(10.dp))
             BalanceMascot(low = low, onRecharge = { openUrl(context, OfficialLinks.RECHARGE) })
@@ -154,6 +160,46 @@ fun BalanceScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * 峰谷提示：当前处于梁文峰 / 谷时间，并给出距离下次切换的倒计时。
+ * 规则见 [com.chatcat.domain.model.PeakValley]（工作日 9-12、14-18 为峰，其余为谷）。
+ */
+@Composable
+private fun PeakValleyCard() {
+    val now = rememberTickingNow()
+    val valley = PeakValley.isValley(now)
+    val accent = if (valley) Color(0xFF2FA36B) else Color(0xFFE5484D)
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(accent),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = if (valley) "当前处于梁文谷时间" else "当前处于梁文峰时间",
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
+            color = accent,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = "距下次切换 ${PeakValley.countdown(now)}",
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

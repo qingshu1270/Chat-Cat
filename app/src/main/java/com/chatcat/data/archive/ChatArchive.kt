@@ -2,6 +2,7 @@ package com.chatcat.data.archive
 
 import android.content.ContentResolver
 import android.net.Uri
+import android.util.Log
 import androidx.room.withTransaction
 import com.chatcat.data.db.AppDatabase
 import com.chatcat.data.db.AttachmentEntity
@@ -19,6 +20,7 @@ import com.chatcat.domain.model.UiMessage
 import com.chatcat.domain.model.VersionResolver
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
@@ -46,6 +48,15 @@ private val LEGACY_FORMATS = setOf("chatcat.archive", "chatdemo.archive")
 
 /** 官方网页端历史导出格式版本（deepseek_data-*.zip） */
 const val OFFICIAL_FORMAT_VERSION = 3
+
+/** 预览时无法得知消息数量（包内没有会话索引）的占位值，界面显示为「以实际导入为准」 */
+const val UNKNOWN_MESSAGE_COUNT = -1
+
+/** 导入时每批写入的会话条数：只影响写库节奏，实体写入后立即丢弃 */
+private const val SESSION_BATCH = 32
+
+/** 单条目超过这个大小就不再按精确长度预分配，走动态扩容，避免被异常 size 拖垮 */
+private const val MAX_EXACT_ENTRY_BYTES = 64L * 1024 * 1024
 
 data class ImportPreview(
     val formatLabel: String,
@@ -223,57 +234,50 @@ class ChatArchive(private val db: AppDatabase) {
 
     suspend fun export(resolver: ContentResolver, uri: Uri): Int = withContext(Dispatchers.IO) {
         val sessions = dao.allSessions()
-        val messages = dao.allMessages().groupBy { it.sessionId }
-        val blocks = dao.allBlocks().groupBy { it.messageId }
-        val attachments = dao.allAttachments().groupBy { it.messageId }
-
-        val entries = mutableListOf<Pair<String, ByteArray>>()
         val index = mutableListOf<V3IndexEntry>()
         var exportedSessions = 0
 
-        sessions.forEach { session ->
-            val all = messages[session.id].orEmpty().map {
-                it.toUi(blocks[it.id].orEmpty(), attachments[it.id].orEmpty())
-            }
-            if (all.isEmpty()) return@forEach
-
-            val (currentId, exported) = buildExportMessages(all)
-            if (exported.isEmpty()) return@forEach
-
-            val file = V3SessionFile(
-                id = session.id,
-                title = session.title.ifBlank { null },
-                pinned = session.pinned,
-                current_message_id = currentId,
-                inserted_at = iso(session.createdAt),
-                updated_at = iso(session.updatedAt),
-                messages = exported,
-            )
-            entries += "chat_sessions/${session.id}.json" to json.encodeToString(file).toByteArray()
-            index += V3IndexEntry(
-                id = session.id,
-                title = session.title.ifBlank { null },
-                pinned = session.pinned,
-                message_count = exported.size,
-                inserted_at = iso(session.createdAt),
-                updated_at = iso(session.updatedAt),
-            )
-            exportedSessions++
-        }
-
-        val manifest = V3ManifestOut()
         val output = resolver.openOutputStream(uri)
             ?: throw IllegalStateException("无法写入所选文件")
 
         ZipOutputStream(BufferedOutputStream(output)).use { zip ->
             zip.putNextEntry(ZipEntry("manifest.json"))
-            zip.write(json.encodeToString(manifest).toByteArray())
+            zip.write(json.encodeToString(V3ManifestOut()).toByteArray())
             zip.closeEntry()
 
-            entries.forEach { (name, bytes) ->
-                zip.putNextEntry(ZipEntry(name))
-                zip.write(bytes)
+            // 一个会话一个条目：读一条、写一条、丢一条，
+            // 不再把所有会话先编码成 ByteArray 攒在 List 里（大历史同样会把堆吃满）
+            sessions.forEach { session ->
+                val all = dao.messages(session.id).map {
+                    it.toUi(dao.blocks(it.id), dao.attachments(it.id))
+                }
+                if (all.isEmpty()) return@forEach
+
+                val (currentId, exported) = buildExportMessages(all)
+                if (exported.isEmpty()) return@forEach
+
+                val file = V3SessionFile(
+                    id = session.id,
+                    title = session.title.ifBlank { null },
+                    pinned = session.pinned,
+                    current_message_id = currentId,
+                    inserted_at = iso(session.createdAt),
+                    updated_at = iso(session.updatedAt),
+                    messages = exported,
+                )
+                zip.putNextEntry(ZipEntry("chat_sessions/${session.id}.json"))
+                zip.write(json.encodeToString(file).toByteArray())
                 zip.closeEntry()
+
+                index += V3IndexEntry(
+                    id = session.id,
+                    title = session.title.ifBlank { null },
+                    pinned = session.pinned,
+                    message_count = exported.size,
+                    inserted_at = iso(session.createdAt),
+                    updated_at = iso(session.updatedAt),
+                )
+                exportedSessions++
             }
 
             zip.putNextEntry(ZipEntry("chat_session_index.json"))
@@ -435,13 +439,38 @@ class ChatArchive(private val db: AppDatabase) {
     /** 已下载到本机缓存的导出包 */
     suspend fun inspect(file: File): ImportPreview = FileInputStream(file).use { inspect(it) }
 
+    /**
+     * 预览只读元信息（manifest / user / 会话索引），**不解析会话正文**。
+     *
+     * 旧实现把所有会话文件读进一个 Map 再整体反序列化，140MB 的包会直接把堆撑爆
+     * （OOM 被系统杀掉，表现为闪退）。现在这一步的内存占用与整包大小无关。
+     */
     suspend fun inspect(input: InputStream): ImportPreview = withContext(Dispatchers.IO) {
-        val entries = readEntries(input)
-        val manifestText = entries["manifest.json"]?.decodeToString()
+        var manifestBytes: ByteArray? = null
+        var userBytes: ByteArray? = null
+        var indexBytes: ByteArray? = null
+        var legacyBytes: ByteArray? = null
+        var sessionEntries = 0
+
+        ZipWalker(input).use { walker ->
+            while (true) {
+                val name = walker.nextEntry() ?: break
+                when {
+                    name == "manifest.json" -> manifestBytes = walker.readCurrent()
+                    name == "user.json" -> userBytes = walker.readCurrent()
+                    name == "chat_session_index.json" -> indexBytes = walker.readCurrent()
+                    // 只有自研旧格式才有 data.json，体量很小；官方 v3 包里不会出现
+                    name == "data.json" -> legacyBytes = walker.readCurrent()
+                    SESSION_PATH.matches(name) -> sessionEntries++
+                }
+            }
+        }
+
+        val manifestText = manifestBytes?.decodeToString()
             ?: throw IllegalArgumentException("压缩包内缺少 manifest.json")
 
         if (manifestText.contains("\"format\"")) {
-            val data = entries["data.json"]?.decodeToString()
+            val data = legacyBytes?.decodeToString()
                 ?: throw IllegalArgumentException("压缩包内缺少 data.json")
             val legacy = json.decodeFromString<LegacyData>(data)
             require(legacy.format in LEGACY_FORMATS) { "不是可识别的备份文件" }
@@ -459,80 +488,207 @@ class ChatArchive(private val db: AppDatabase) {
             "不支持的备份版本：${manifest.export_format_version}"
         }
 
-        val decoded = decodeSessions(entries)
-        require(decoded.isNotEmpty()) { "压缩包内没有可导入的会话" }
-        validateIndex(entries, decoded)
+        // 索引里带着每条会话的消息数，预览无需解析正文
+        val index = indexBytes?.let { parseIndex(it) }
+        val count = index?.size?.takeIf { it > 0 } ?: sessionEntries
+        require(count > 0) { "压缩包内没有可导入的会话" }
 
         ImportPreview(
             formatLabel = "deepseek v$OFFICIAL_FORMAT_VERSION",
-            sessionCount = decoded.size,
-            messageCount = decoded.sumOf { it.messages.size },
-            userName = entries["user.json"]?.let { extractUserName(it.decodeToString()) },
+            sessionCount = count,
+            // 没有索引时无法在不解析正文的前提下统计消息数，交给界面显示「以实际导入为准」
+            messageCount = index?.sumOf { it.message_count } ?: UNKNOWN_MESSAGE_COUNT,
+            userName = userBytes?.let { extractUserName(it.decodeToString()) },
         )
     }
 
     // ------------------------------- 导入 -------------------------------
 
-    suspend fun import(resolver: ContentResolver, uri: Uri, mode: ImportMode = ImportMode.MERGE): ImportResult {
+    suspend fun import(
+        resolver: ContentResolver,
+        uri: Uri,
+        mode: ImportMode = ImportMode.MERGE,
+        onProgress: ((Int) -> Unit)? = null,
+    ): ImportResult {
+        // 先只读包首的 manifest：格式或版本不对就根本不碰本机数据
+        val legacy = peekIsLegacy {
+            resolver.openInputStream(uri) ?: throw IllegalArgumentException("无法读取所选文件")
+        }
         val input = resolver.openInputStream(uri)
             ?: throw IllegalArgumentException("无法读取所选文件")
-        return input.use { import(it, mode) }
+        return input.use {
+            if (legacy) importLegacyStream(it, mode) else importV3(it, mode, onProgress)
+        }
     }
 
     /** 已下载到本机缓存的导出包 */
-    suspend fun import(file: File, mode: ImportMode = ImportMode.MERGE): ImportResult =
-        FileInputStream(file).use { import(it, mode) }
+    suspend fun import(
+        file: File,
+        mode: ImportMode = ImportMode.MERGE,
+        onProgress: ((Int) -> Unit)? = null,
+    ): ImportResult {
+        val legacy = peekIsLegacy { FileInputStream(file) }
+        return FileInputStream(file).use {
+            if (legacy) importLegacyStream(it, mode) else importV3(it, mode, onProgress)
+        }
+    }
 
+    /**
+     * 单流入口：先落到临时文件再按常规流程导入。
+     * 不这么做就没法「先看 manifest 再决定怎么读」，而把整包读进内存正是要修的问题。
+     */
     suspend fun import(input: InputStream, mode: ImportMode = ImportMode.MERGE): ImportResult =
         withContext(Dispatchers.IO) {
-            val entries = readEntries(input)
-            val manifestText = entries["manifest.json"]?.decodeToString()
-                ?: throw IllegalArgumentException("压缩包内缺少 manifest.json")
-
-            if (manifestText.contains("\"format\"")) {
-                val raw = entries["data.json"]?.decodeToString()
-                    ?: throw IllegalArgumentException("压缩包内缺少 data.json")
-                return@withContext importLegacy(raw, mode)
+            val temp = File.createTempFile("chatcat_import_", ".zip")
+            try {
+                input.use { src ->
+                    temp.outputStream().use { out -> src.copyTo(out, 64 * 1024) }
+                }
+                import(temp, mode)
+            } finally {
+                temp.delete()
             }
-
-            val manifest = json.decodeFromString<V3Manifest>(manifestText)
-            require(manifest.export_format_version == OFFICIAL_FORMAT_VERSION) { "备份版本不受支持" }
-            importV3(entries, mode)
         }
 
-    private suspend fun importV3(entries: Map<String, ByteArray>, mode: ImportMode): ImportResult {
-        val decoded = decodeSessions(entries)
-        require(decoded.isNotEmpty()) { "压缩包内没有可导入的会话" }
-        validateIndex(entries, decoded)
+    /**
+     * 自研旧格式：data.json 体量很小，仍然整体解析（与原逻辑一致）。
+     */
+    private suspend fun importLegacyStream(input: InputStream, mode: ImportMode): ImportResult {
+        var data: ByteArray? = null
+        ZipWalker(input).use { walker ->
+            while (true) {
+                val name = walker.nextEntry() ?: break
+                if (name == "data.json") data = walker.readCurrent()
+            }
+        }
+        val raw = data?.decodeToString() ?: throw IllegalArgumentException("压缩包内缺少 data.json")
+        return importLegacy(raw, mode)
+    }
 
-        val prepared = decoded.map { file -> toLocalSession(file) }
-
-        // 合并模式：按「标题 + 创建时间」跳过本机已有的对话（官方导出里这两个字段稳定，
-        // 本机导入时也原样保留，因此同一份备份重复导入不会产生副本）
-        val incoming = if (mode == ImportMode.MERGE) {
-            pickNew(
-                prepared.map { it.first.title to it.first.createdAt },
-                dao.allSessions().map { it.title to it.createdAt },
-            ).map { prepared[it] }
+    /**
+     * 官方 v3 包：**逐条会话流式导入**。
+     *
+     * - 任何时刻内存里只有「一条会话的字节 + 它解析出来的对象」，入库后立刻丢弃；
+     * - 每 [SESSION_BATCH] 条提交一次；
+     * - 合并模式下整包是幂等的（按标题 + 创建时间去重），因此逐批提交是安全的：
+     *   中途失败或被系统杀掉，直接再导入一次就会补全，不会产生副本；
+     * - 覆盖模式是「先清空再写」，所以整包放在一个事务里，要么全成要么全不动。
+     */
+    private suspend fun importV3(
+        input: InputStream,
+        mode: ImportMode,
+        onProgress: ((Int) -> Unit)? = null,
+    ): ImportResult {
+        val seen = if (mode == ImportMode.MERGE) {
+            dao.allSessions().mapTo(HashSet()) { ArchiveMerge.fingerprint(it.title, it.createdAt) }
         } else {
-            prepared
+            HashSet()
         }
-        val skipped = prepared.size - incoming.size
-        val messageCount = incoming.sumOf { it.second.size }
 
-        db.withTransaction {
-            // 覆盖语义：先清空；合并语义：只追加缺失的会话
-            if (mode == ImportMode.REPLACE) dao.deleteAllSessions()
-            incoming.forEach { (session, messages) ->
-                dao.upsertSession(session)
-                messages.forEach { local ->
-                    dao.upsertMessage(local.entity)
-                    if (local.blocks.isNotEmpty()) dao.upsertBlocks(local.blocks)
-                    if (local.attachments.isNotEmpty()) dao.upsertAttachments(local.attachments)
+        var sessions = 0
+        var messages = 0
+        var skipped = 0
+        var manifestOk = false
+        val parsedIds = HashSet<String>()
+        val indexIds = HashSet<String>()
+        val batch = ArrayList<Pair<SessionEntity, List<LocalMessage>>>(SESSION_BATCH)
+
+        suspend fun flush() {
+            if (batch.isEmpty()) return
+            val pending = batch.toList()
+            batch.clear()
+            db.withTransaction {
+                pending.forEach { (session, list) -> writeSession(session, list) }
+            }
+            onProgress?.invoke(sessions)
+        }
+
+        suspend fun walk() {
+            ZipWalker(input).use { walker ->
+                while (true) {
+                    val name = walker.nextEntry() ?: break
+                    when {
+                        name == "manifest.json" -> {
+                            val manifest = json.decodeFromString<V3Manifest>(
+                                walker.readCurrent().decodeToString(),
+                            )
+                            require(manifest.export_format_version == OFFICIAL_FORMAT_VERSION) {
+                                "备份版本不受支持"
+                            }
+                            manifestOk = true
+                        }
+
+                        name == "chat_session_index.json" -> {
+                            parseIndex(walker.readCurrent())?.forEach { indexIds += it.id }
+                        }
+
+                        SESSION_PATH.matches(name) -> {
+                            // manifest 必须先出现：否则无法确认格式，也不能安全地清库
+                            require(manifestOk) { "压缩包结构异常：manifest.json 不在包首，请重新导出" }
+
+                            // 单条会话异常（超大 / 损坏 / 单条就把堆吃光）只跳过这一条，不拖垮整包
+                            val local = try {
+                                val bytes = walker.readCurrent()
+                                val file = json.decodeFromString<V3SessionFile>(bytes.decodeToString())
+                                parsedIds += file.id
+                                val key = ArchiveMerge.fingerprint(
+                                    file.title.orEmpty(),
+                                    parseIso(file.inserted_at),
+                                )
+                                if (mode == ImportMode.MERGE && !seen.add(key)) {
+                                    null
+                                } else {
+                                    toLocalSession(file)
+                                }
+                            } catch (e: OutOfMemoryError) {
+                                Log.w("ChatCat", "skip oversized session $name", e)
+                                null
+                            } catch (e: Exception) {
+                                Log.w("ChatCat", "skip broken session $name", e)
+                                null
+                            }
+
+                            if (local == null) {
+                                skipped++
+                                continue
+                            }
+                            batch += local
+                            sessions++
+                            messages += local.second.size
+                            if (batch.size >= SESSION_BATCH) flush()
+                        }
+                    }
                 }
             }
         }
-        return ImportResult(incoming.size, messageCount, skipped)
+
+        if (mode == ImportMode.REPLACE) {
+            db.withTransaction {
+                dao.deleteAllSessions()
+                walk()
+            }
+        } else {
+            walk()
+        }
+        flush()
+
+        // 索引一致性：与旧实现同一口径（条数相同且 id 全部对上）
+        if (indexIds.isNotEmpty()) {
+            require(indexIds.size == parsedIds.size && parsedIds.containsAll(indexIds)) {
+                "会话索引与文件不一致"
+            }
+        }
+        require(sessions > 0 || skipped > 0) { "压缩包内没有可导入的会话" }
+        return ImportResult(sessions, messages, skipped)
+    }
+
+    private suspend fun writeSession(session: SessionEntity, messages: List<LocalMessage>) {
+        dao.upsertSession(session)
+        messages.forEach { local ->
+            dao.upsertMessage(local.entity)
+            if (local.blocks.isNotEmpty()) dao.upsertBlocks(local.blocks)
+            if (local.attachments.isNotEmpty()) dao.upsertAttachments(local.attachments)
+        }
     }
 
     private suspend fun importLegacy(raw: String, mode: ImportMode): ImportResult {
@@ -784,69 +940,32 @@ class ChatArchive(private val db: AppDatabase) {
 
     // ------------------------------- 工具 -------------------------------
 
-    private fun decodeSessions(entries: Map<String, ByteArray>): List<V3SessionFile> =
-        entries.keys
-            .filter { SESSION_PATH.matches(it) }
-            .mapNotNull { path ->
-                runCatching {
-                    json.decodeFromString<V3SessionFile>(entries.getValue(path).decodeToString())
-                }.getOrNull()
+    private fun parseIndex(bytes: ByteArray): List<V3IndexEntry>? =
+        runCatching { json.decodeFromString<List<V3IndexEntry>>(bytes.decodeToString()) }.getOrNull()
+
+    /**
+     * 只读包首的 manifest 判断是不是自研旧格式；顺手把 v3 版本号校验掉。
+     * manifest 在包首时只需解压极少数据，代价可以忽略。
+     */
+    private suspend fun peekIsLegacy(open: () -> InputStream): Boolean = withContext(Dispatchers.IO) {
+        val manifestText = open().use { input ->
+            var text: String? = null
+            ZipWalker(input).use { walker ->
+                while (true) {
+                    val name = walker.nextEntry() ?: break
+                    if (name == "manifest.json") {
+                        text = walker.readCurrent().decodeToString()
+                        break
+                    }
+                }
             }
+            text
+        } ?: throw IllegalArgumentException("压缩包内缺少 manifest.json")
 
-    private fun validateIndex(entries: Map<String, ByteArray>, decoded: List<V3SessionFile>) {
-        val indexBytes = entries["chat_session_index.json"] ?: return
-        val index = runCatching {
-            json.decodeFromString<List<V3IndexEntry>>(indexBytes.decodeToString())
-        }.getOrNull() ?: return
-        val ids = decoded.map { it.id }.toSet()
-        require(index.size == ids.size && index.all { it.id in ids }) { "会话索引与文件不一致" }
-    }
-
-    private fun readEntries(input: InputStream): Map<String, ByteArray> {
-        val entries = mutableMapOf<String, ByteArray>()
-        var prefix = ""
-        var first = true
-
-        ZipInputStream(BufferedInputStream(input)).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                val rawName = entry.name
-
-                // 官方文件可能整包套一层目录（deepseek_data-xxx/），先识别并剥离
-                if (first) {
-                    first = false
-                    prefix = detectPrefix(rawName, entry.isDirectory)
-                }
-                val name = if (prefix.isNotEmpty() && rawName.startsWith(prefix)) {
-                    rawName.removePrefix(prefix)
-                } else {
-                    rawName
-                }
-
-                if (!entry.isDirectory &&
-                    (name == "manifest.json" ||
-                        name == "user.json" ||
-                        name == "data.json" ||
-                        name == "chat_session_index.json" ||
-                        SESSION_PATH.matches(name))
-                ) {
-                    entries[name] = zip.readBytes()
-                }
-                zip.closeEntry()
-            }
-        }
-        return entries
-    }
-
-    /** 第一个条目是单段目录（xxx/）或嵌套路径时，视为整包前缀 */
-    private fun detectPrefix(rawName: String, isDirectory: Boolean): String {
-        if (!rawName.contains('/')) return ""
-        if (isDirectory) {
-            val segments = rawName.trimEnd('/').split('/')
-            return if (segments.size == 1) rawName else ""
-        }
-        val head = rawName.substringBefore('/')
-        return "$head/"
+        if (manifestText.contains("\"format\"")) return@withContext true
+        val manifest = json.decodeFromString<V3Manifest>(manifestText)
+        require(manifest.export_format_version == OFFICIAL_FORMAT_VERSION) { "备份版本不受支持" }
+        false
     }
 
     /** user.json 只取显示名；邮箱、手机号等一律不读。 */
@@ -974,6 +1093,83 @@ class ChatArchive(private val db: AppDatabase) {
     )
 
     companion object {
-        private val SESSION_PATH = Regex("^chat_sessions/([^/]+)\\.json$")
+        internal val SESSION_PATH = Regex("^chat_sessions/([^/]+)\\.json$")
+    }
+}
+
+/** 归档里我们认识的顶层文件名（不含外层包裹目录时） */
+private fun isArchiveFile(name: String): Boolean =
+    name == "manifest.json" ||
+        name == "user.json" ||
+        name == "data.json" ||
+        name == "chat_session_index.json" ||
+        ChatArchive.SESSION_PATH.matches(name)
+
+/** 首个文件条目的顶层目录（deepseek_data-xxx/）即视为整包前缀；无目录返回空串 */
+internal fun detectPrefix(rawName: String): String {
+    if (!rawName.contains('/')) return ""
+    return rawName.substringBefore('/') + "/"
+}
+
+internal fun stripPrefix(rawName: String, prefix: String): String =
+    if (prefix.isNotEmpty() && rawName.startsWith(prefix)) rawName.removePrefix(prefix) else rawName
+
+/**
+ * 逐条遍历 ZIP 的读指针。
+ *
+ * 与「一次读完所有条目」不同：只有调用 [readCurrent] 时才会把当前条目读成字节，
+ * 读完即丢，所以常驻内存只和「单条会话」有关，与整包大小无关。
+ */
+internal class ZipWalker(input: InputStream) : Closeable {
+    private val zip = ZipInputStream(BufferedInputStream(input, 64 * 1024))
+    private var prefix: String? = null
+    private var currentSize: Long = -1
+    private var done = false
+
+    /** 前进到下一条文件条目并返回其（已剥离外层目录的）路径；读完返回 null */
+    fun nextEntry(): String? {
+        if (done) return null
+        while (true) {
+            val entry = zip.nextEntry ?: run { done = true; return null }
+            if (entry.isDirectory) {
+                // 目录条目（如 chat_sessions/）不参与前缀判定，否则会被误当成外层包裹目录
+                zip.closeEntry()
+                continue
+            }
+            val known = prefix
+            if (known == null) {
+                val candidate = detectPrefix(entry.name)
+                // 候选前缀只有在「剥掉之后确实是一条归档文件」时才成立；
+                // 否则第一个文件正好是 chat_sessions/x.json 时会被错剥成 x.json
+                prefix = if (candidate.isNotEmpty() && isArchiveFile(stripPrefix(entry.name, candidate))) {
+                    candidate
+                } else {
+                    ""
+                }
+            }
+            currentSize = entry.size
+            return stripPrefix(entry.name, prefix.orEmpty())
+        }
+    }
+
+    /** 读取当前条目的全部字节（每个条目只能读一次） */
+    fun readCurrent(): ByteArray {
+        val size = currentSize
+        // 本地头里带解压后大小时按精确长度分配，避免 readBytes 反复扩容造成的瞬时双份
+        if (size in 1..MAX_EXACT_ENTRY_BYTES) {
+            val buffer = ByteArray(size.toInt())
+            var read = 0
+            while (read < buffer.size) {
+                val n = zip.read(buffer, read, buffer.size - read)
+                if (n < 0) break
+                read += n
+            }
+            return if (read == buffer.size) buffer else buffer.copyOf(read)
+        }
+        return zip.readBytes()
+    }
+
+    override fun close() {
+        runCatching { zip.close() }
     }
 }

@@ -111,6 +111,8 @@ private sealed interface SettingsPage {
 fun SettingsScreen(
     settings: AppSettings,
     archiving: Boolean,
+    importProgress: Int = -1,
+    importTotal: Int = 0,
     archiveNotice: String?,
     importPreview: ImportPreview?,
     usageOverviewOpen: Boolean,
@@ -126,6 +128,7 @@ fun SettingsScreen(
     onClearKeys: () -> Unit,
     onExport: (Uri) -> Unit,
     onImport: (Uri) -> Unit,
+    onClearImportCache: () -> Unit,
     onConfirmImport: (Boolean, ImportMode) -> Unit,
     onCancelImport: () -> Unit,
     onBaseUrl: (String) -> Unit,
@@ -325,12 +328,15 @@ fun SettingsScreen(
 
             SettingsPage.Data -> DataPage(
                 archiving = archiving,
+                importProgress = importProgress,
+                importTotal = importTotal,
                 notice = archiveNotice,
                 onExport = { exportLauncher.launch("deepseek_data-$stamp.zip") },
                 onImport = {
                     importLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
                 },
                 onOpenImportGuide = onOpenImportGuide,
+                onClearImportCache = onClearImportCache,
                 onDeleteAll = { page = SettingsPage.DeleteAll },
                 onBack = { page = null },
             )
@@ -496,6 +502,8 @@ fun SettingsScreen(
             ImportReviewPage(
                 preview = importPreview,
                 archiving = archiving,
+                importProgress = importProgress,
+                importTotal = importTotal,
                 onConfirm = onConfirmImport,
                 onCancel = onCancelImport,
             )
@@ -642,10 +650,13 @@ private fun AccountPage(
 @Composable
 private fun DataPage(
     archiving: Boolean,
+    importProgress: Int,
+    importTotal: Int,
     notice: String?,
     onExport: () -> Unit,
     onImport: () -> Unit,
     onOpenImportGuide: () -> Unit,
+    onClearImportCache: () -> Unit,
     onDeleteAll: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -685,6 +696,16 @@ private fun DataPage(
         )
         Spacer(Modifier.height(8.dp))
         PageCard {
+            SettingRow("清理导入缓存") { onClearImportCache() }
+        }
+        Text(
+            "导入失败或中途退出可能留下临时包（最大可与导出包等大）。每次启动会自动清理，这里也可以手动清。",
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        PageCard {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -715,7 +736,13 @@ private fun DataPage(
                     Spacer(Modifier.width(10.dp))
                 }
                 Text(
-                    text = if (archiving) "正在处理…" else notice.orEmpty(),
+                    text = when {
+                        importProgress >= 0 && importTotal > 0 ->
+                            "正在导入：已处理 $importProgress / $importTotal 个对话（大包可能需要几分钟，请保持应用在前台）"
+                        importProgress >= 0 -> "正在导入：已处理 $importProgress 个对话"
+                        archiving -> "正在处理…"
+                        else -> notice.orEmpty()
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1015,6 +1042,8 @@ private fun DeleteAllPage(onConfirm: () -> Unit, onBack: () -> Unit) {
 private fun ImportReviewPage(
     preview: ImportPreview,
     archiving: Boolean,
+    importProgress: Int,
+    importTotal: Int,
     onConfirm: (Boolean, ImportMode) -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -1033,7 +1062,10 @@ private fun ImportReviewPage(
         PageCard {
             InfoRow("备份格式", preview.formatLabel)
             InfoRow("对话数量", "${preview.sessionCount}")
-            InfoRow("消息数量", "${preview.messageCount}")
+            InfoRow(
+                "消息数量",
+                if (preview.messageCount < 0) "以实际导入为准" else "${preview.messageCount}",
+            )
         }
 
         Text(
@@ -1082,8 +1114,19 @@ private fun ImportReviewPage(
         }
 
         Spacer(Modifier.height(16.dp))
+        if (archiving && importTotal > 0) {
+            Text(
+                "已处理 $importProgress / $importTotal 个对话，请保持应用在前台；" +
+                    "中途中断可重新导入，已导入的对话不会重复",
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
         PrimaryButton(
             text = when {
+                archiving && importTotal > 0 -> "正在导入 $importProgress / $importTotal"
                 archiving -> "正在导入…"
                 mode == ImportMode.MERGE -> "开始合并"
                 else -> "覆盖导入"

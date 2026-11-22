@@ -52,7 +52,7 @@ class CitationTest {
                 Citation("https://a.example"),
             ),
         )
-        assertEquals("答案[¹](https://a.example)[²](https://b.example)", msg.textWithCitations)
+        assertEquals("答案[1](https://a.example)[2](https://b.example)", msg.textWithCitations)
     }
 
     @Test

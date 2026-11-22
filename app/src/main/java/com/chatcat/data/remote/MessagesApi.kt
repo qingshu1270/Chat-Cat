@@ -78,9 +78,18 @@ class MessagesApi(private val client: OkHttpClient) {
                     .getOrNull() ?: throw ApiException(ApiException.Kind.PROTOCOL, "无法解析的流数据")
 
                 (root["error"] as? JsonObject)?.let { err ->
+                    val message = err["message"].str() ?: "流式返回错误"
+                    val type = err["type"].str()
+                    // 流式输出到一半命中内容审核时，服务端通过 error 帧返回：
+                    // 这种情况必须识别成 CONTENT_RISK，才能触发「撤回正文 + 柔和提示」
                     throw ApiException(
-                        ApiException.Kind.STREAM_INTERRUPTED,
-                        err["message"].str() ?: "流式返回错误",
+                        if (ApiException.isRiskMessage(type, message, err["code"].str())) {
+                            ApiException.Kind.CONTENT_RISK
+                        } else {
+                            ApiException.Kind.STREAM_INTERRUPTED
+                        },
+                        message,
+                        requestId = err["request_id"].str(),
                     )
                 }
 
