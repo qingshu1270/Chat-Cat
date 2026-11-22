@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AttachmentEntity::class,
         UsageRecordEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -27,6 +27,15 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
                 db.execSQL("ALTER TABLE messages ADD COLUMN thinkingMs INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** v5：全文检索按 createdAt 分段时间窗，补一个索引让时间窗筛选走索引 */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_messages_createdAt` ON `messages` (`createdAt`)",
+                )
             }
         }
 

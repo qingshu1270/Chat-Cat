@@ -1,5 +1,7 @@
 package com.chatcat.ui.components
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -19,21 +22,30 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -54,6 +66,9 @@ import com.chatcat.domain.model.TableCsv
 import com.chatcat.domain.model.ToolSource
 import com.chatcat.ui.theme.LocalDarkTheme
 import com.chatcat.ui.theme.Tokens
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private sealed interface Segment {
     data class Code(val language: String, val code: String) : Segment
@@ -220,14 +235,18 @@ private fun MarkdownBlocks(
                 }
 
                 is Block.Divider -> {
-                    Spacer(Modifier.height(6.dp * gap))
+                    // 对齐官方 chat-demo：`hr { height:1px; margin:32px 0; background: border-l2 }`
+                    // border-l2 = 浅色 rgba(0,0,0,.1) / 深色 rgba(255,255,255,.12)
+                    val hairline = MaterialTheme.colorScheme.onSurface
+                        .copy(alpha = if (LocalDarkTheme.current) 0.12f else 0.10f)
+                    Spacer(Modifier.height(32.dp * gap))
                     Box(
                         Modifier
                             .fillMaxWidth()
                             .height(1.dp)
-                            .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                            .background(hairline),
                     )
-                    Spacer(Modifier.height(10.dp * gap))
+                    Spacer(Modifier.height(32.dp * gap))
                 }
 
                 is Block.Quote -> {
@@ -257,43 +276,210 @@ private fun TableBlock(table: Block.Table) {
     val columns = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
     if (columns == 0) return
     val clipboard = LocalClipboardManager.current
-    var copied by remember { mutableStateOf(false) }
-    val widths = (0 until columns).map { column ->
-        val chars = (table.header.getOrNull(column)?.length ?: 0)
-            .coerceAtLeast(table.rows.maxOfOrNull { it.getOrNull(column)?.length ?: 0 } ?: 0)
-        (chars.coerceIn(4, 22) * 9 + 22).dp
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var expanded by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf<String?>(null) }
+    val csv = remember(table) { TableCsv.encode(table.header, table.rows) }
+    // 下载走系统「另存为」，各版本都不需要存储权限
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv"),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openOutputStream(uri)?.use {
+                            it.write(csv.toByteArray())
+                        } != null
+                    }.getOrDefault(false)
+                }
+                saved = if (ok) "已保存 CSV" else "保存失败"
+            }
+        }
     }
-    Column {
-        Text(
-            text = if (copied) "已复制 CSV" else "复制为 CSV",
-            modifier = Modifier
-                .padding(bottom = 4.dp)
-                .clickable {
-                    clipboard.setText(AnnotatedString(TableCsv.encode(table.header, table.rows)))
-                    copied = true
-                },
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
+
+    // 卡片铺满可用宽度：表头行固定，表格本体在下面横向滚动（官方做法）
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .border(0.5.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp)),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                .padding(start = 14.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "表格",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (saved != null) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = saved.orEmpty(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            BlockActionButtons(
+                listOf(
+                    BlockAction(Icons.Outlined.ContentCopy, "复制表格") {
+                        clipboard.setText(AnnotatedString(csv)); saved = "已复制 CSV"
+                    },
+                    BlockAction(Icons.Outlined.FileDownload, "下载 CSV") {
+                        saveLauncher.launch("表格_${System.currentTimeMillis() / 1000}.csv")
+                    },
+                    BlockAction(Icons.Outlined.OpenInFull, "放大查看") { expanded = true },
+                ),
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(0.5.dp)
+                .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
         )
         Row(Modifier.horizontalScroll(rememberScrollState())) {
-            Column(
+            TableSurface(table, columns)
+        }
+    }
+
+    if (expanded) {
+        FullScreenPanel(title = "表格", onClose = { expanded = false }) {
+            Column(Modifier.fillMaxWidth()) {
+                TableSurface(table, columns, wide = true)
+            }
+        }
+    }
+}
+
+/** 表格网格本体：列表 + 放大器共用 */
+@Composable
+private fun TableSurface(
+    table: Block.Table,
+    columns: Int,
+    wide: Boolean = false,
+    topBar: (@Composable (Modifier) -> Unit)? = null,
+) {
+    val widths = (0 until columns).map { column ->
+        val units = displayUnits(table.header.getOrNull(column).orEmpty())
+            .coerceAtLeast(table.rows.maxOfOrNull { displayUnits(it.getOrNull(column).orEmpty()) } ?: 0)
+        // CJK 按 2 个字符宽计算，避免「8 个月」被挤成两行
+        (units.coerceIn(6, if (wide) 40 else 30) * 7 + 24).dp
+    }
+    Column(
+        Modifier
+            .then(
+                if (wide) {
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .border(0.5.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+                } else {
+                    Modifier
+                },
+            ),
+    ) {
+        val totalWidth = widths.fold(0.dp) { acc, w -> acc + w }
+        topBar?.let {
+            it(Modifier.width(totalWidth))
+            Box(
                 Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .border(
-                        0.5.dp,
-                        MaterialTheme.colorScheme.outline,
-                        RoundedCornerShape(10.dp),
-                    ),
+                    .fillMaxWidth()
+                    .height(0.5.dp)
+                    .background(MaterialTheme.colorScheme.outline),
+            )
+        }
+        TableRow(table.header, widths, columns, header = true)
+        table.rows.forEach { row ->
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(0.5.dp)
+                    .background(MaterialTheme.colorScheme.outline),
+            )
+            TableRow(row, widths, columns, header = false)
+        }
+    }
+}
+
+/** 代码块 / 表格右上角的图标工具条 */
+private data class BlockAction(
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val label: String,
+    val onClick: () -> Unit,
+)
+
+@Composable
+private fun BlockActionButtons(actions: List<BlockAction>) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        actions.forEach { action ->
+            IconButton(
+                onClick = action.onClick,
+                modifier = Modifier.size(30.dp),
             ) {
-                TableRow(table.header, widths, columns, header = true)
-                table.rows.forEach { row ->
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .height(0.5.dp)
-                            .background(MaterialTheme.colorScheme.outline),
+                Icon(
+                    action.icon,
+                    contentDescription = action.label,
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** 全屏查看面板：表格放大、代码放大共用 */
+@Composable
+private fun FullScreenPanel(
+    title: String,
+    onClose: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().height(androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp),
+            color = MaterialTheme.colorScheme.background,
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
-                    TableRow(row, widths, columns, header = false)
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = "关闭",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    content()
                 }
             }
         }
@@ -313,6 +499,14 @@ private fun TableRow(
         ),
     ) {
         repeat(columns) { column ->
+            if (column > 0) {
+                Box(
+                    Modifier
+                        .width(0.5.dp)
+                        .height(IntrinsicSize.Min)
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                )
+            }
             Box(Modifier.width(widths[column]).padding(horizontal = 10.dp, vertical = 8.dp)) {
                 Text(
                     text = inline(
@@ -368,9 +562,31 @@ private fun highlightedCode(code: String, dark: Boolean): AnnotatedString = buil
 @Composable
 private fun CodeBlock(language: String, code: String) {
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val dark = LocalDarkTheme.current
     val background = if (dark) Color(0xFF1B1F27) else Color(0xFFF7F8FA)
     val border = MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)
+    var expanded by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf<String?>(null) }
+    val body = remember(code) { code.trimEnd() }
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openOutputStream(uri)?.use {
+                            it.write(body.toByteArray())
+                        } != null
+                    }.getOrDefault(false)
+                }
+                saved = if (ok) "已保存" else "保存失败"
+            }
+        }
+    }
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -389,9 +605,18 @@ private fun CodeBlock(language: String, code: String) {
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (saved != null) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = saved.orEmpty(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Spacer(Modifier.weight(1f))
+            // 与表格统一：右上角三个动作——复制 / 下载 / 放大
             IconButton(
-                onClick = { clipboard.setText(AnnotatedString(code)) },
+                onClick = { clipboard.setText(AnnotatedString(body)); saved = "已复制" },
                 modifier = Modifier.size(30.dp),
             ) {
                 Icon(
@@ -401,10 +626,32 @@ private fun CodeBlock(language: String, code: String) {
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            IconButton(
+                onClick = { saveLauncher.launch("代码_${System.currentTimeMillis() / 1000}.txt") },
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.FileDownload,
+                    contentDescription = "下载代码",
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(
+                onClick = { expanded = true },
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.OpenInFull,
+                    contentDescription = "放大查看",
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         SelectionContainer {
             Text(
-                text = highlightedCode(code.trimEnd(), dark),
+                text = highlightedCode(body, dark),
                 modifier = Modifier
                     .horizontalScroll(rememberScrollState())
                     .padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
@@ -413,6 +660,21 @@ private fun CodeBlock(language: String, code: String) {
                 lineHeight = 21.sp,
                 color = MaterialTheme.colorScheme.onSurface,
             )
+        }
+    }
+
+    if (expanded) {
+        FullScreenPanel(title = language.ifBlank { "代码" }, onClose = { expanded = false }) {
+            SelectionContainer {
+                Text(
+                    text = highlightedCode(body, dark),
+                    modifier = Modifier.fillMaxWidth(),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    lineHeight = 21.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
         }
     }
 }
@@ -491,6 +753,13 @@ private fun parseBlocks(markdown: String): List<Block> {
     }
     flushParagraph()
     return blocks
+}
+
+/** 估算显示宽度：CJK 记 2，ASCII 记 1 */
+private fun displayUnits(text: String): Int {
+    var width = 0
+    text.forEach { ch -> width += if (ch.code > 0x2E80) 2 else 1 }
+    return width
 }
 
 private fun isDivider(line: String): Boolean {

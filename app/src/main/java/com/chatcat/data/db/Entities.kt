@@ -28,7 +28,7 @@ data class SessionEntity(
             onDelete = ForeignKey.CASCADE,
         ),
     ],
-    indices = [Index("sessionId"), Index("parentId")],
+    indices = [Index("sessionId"), Index("parentId"), Index("createdAt")],
 )
 data class MessageEntity(
     @PrimaryKey val id: String,

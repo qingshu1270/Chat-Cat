@@ -49,6 +49,9 @@ private val LEGACY_FORMATS = setOf("chatcat.archive", "chatdemo.archive")
 /** 官方网页端历史导出格式版本（deepseek_data-*.zip） */
 const val OFFICIAL_FORMAT_VERSION = 3
 
+/** 官方包里的附件目录：chat_sessions/{会话id}_files/{路径} */
+private val SESSION_FILES_PATH = Regex("^chat_sessions/([^/]+)_files/(.+)$")
+
 /** 预览时无法得知消息数量（包内没有会话索引）的占位值，界面显示为「以实际导入为准」 */
 const val UNKNOWN_MESSAGE_COUNT = -1
 
@@ -221,7 +224,11 @@ private data class LegacyBlock(
  * **合并增量**（默认）保留本机已有会话、只追加缺失的；**覆盖**则整体替换。
  * 两种方式都先完整解析，成功后在单个事务里落库，失败不动原数据。
  */
-class ChatArchive(private val db: AppDatabase) {
+class ChatArchive(
+    private val db: AppDatabase,
+    /** 官方包里的附件二进制会解到这里；为 null 时只保留附件元信息（旧行为） */
+    private val attachmentsRoot: File? = null,
+) {
 
     private val dao = db.chatDao()
     private val json = Json {
@@ -589,6 +596,12 @@ class ChatArchive(private val db: AppDatabase) {
         var messages = 0
         var skipped = 0
         var manifestOk = false
+        // 导出包里的会话 id → 本机新会话 id；用于把附件目录对回到具体会话
+        val sessionIdMap = HashMap<String, String>()
+        // 已落盘的附件：原会话 id / 文件名 / 本地绝对路径
+        val storedFiles = ArrayList<Triple<String, String, String>>()
+        // 本次导入真正写过文件的会话 id：只清理这些，避免误删历史导入的附件
+        val createdOriginIds = HashSet<String>()
         val parsedIds = HashSet<String>()
         val indexIds = HashSet<String>()
         val batch = ArrayList<Pair<SessionEntity, List<LocalMessage>>>(SESSION_BATCH)
@@ -622,6 +635,24 @@ class ChatArchive(private val db: AppDatabase) {
                             parseIndex(walker.readCurrent())?.forEach { indexIds += it.id }
                         }
 
+                        // 官方云端附件：解到本机私有目录，导入后由附件行引用
+                        SESSION_FILES_PATH.matches(name) -> {
+                            val group = SESSION_FILES_PATH.find(name)
+                            if (group != null) {
+                                val originId = group.groupValues[1]
+                                val relative = group.groupValues[2]
+                                val saved = saveAttachmentFile(originId, relative, walker.readCurrent())
+                                if (saved != null) {
+                                    createdOriginIds += originId
+                                    storedFiles += Triple(
+                                        originId,
+                                        relative.substringAfterLast('/'),
+                                        saved,
+                                    )
+                                }
+                            }
+                        }
+
                         SESSION_PATH.matches(name) -> {
                             // manifest 必须先出现：否则无法确认格式，也不能安全地清库
                             require(manifestOk) { "压缩包结构异常：manifest.json 不在包首，请重新导出" }
@@ -652,6 +683,9 @@ class ChatArchive(private val db: AppDatabase) {
                                 skipped++
                                 continue
                             }
+                            // 记录映射：附件目录用导出包里的会话 id 命名
+                            val originId = SESSION_PATH.find(name)?.groupValues?.get(1).orEmpty()
+                            if (originId.isNotEmpty()) sessionIdMap[originId] = local.first.id
                             batch += local
                             sessions++
                             messages += local.second.size
@@ -679,7 +713,56 @@ class ChatArchive(private val db: AppDatabase) {
             }
         }
         require(sessions > 0 || skipped > 0) { "压缩包内没有可导入的会话" }
+
+        // 附件回填：文件可能出现在会话 JSON 之前或之后，统一在走完后按「会话 + 文件名」回写
+        linkAttachments(storedFiles, sessionIdMap)
+        dropUnusedAttachmentDirs(createdOriginIds, sessionIdMap)
+
         return ImportResult(sessions, messages, skipped)
+    }
+
+    /**
+     * 把官方包里的附件二进制落到本机私有目录：`<root>/<导出会话id>/<相对路径>`。
+     * 返回本地绝对路径；没有可用目录或路径异常时返回 null（只保留元信息）。
+     */
+    private fun saveAttachmentFile(originId: String, relative: String, bytes: ByteArray): String? {
+        val root = attachmentsRoot ?: return null
+        val segments = relative.split('/').filter { it.isNotBlank() && it != "." && it != ".." }
+        if (segments.isEmpty()) return null
+        return runCatching {
+            val dir = File(root, originId)
+            val target = File(dir, segments.joinToString(File.separator))
+            // 防目录穿越：真实路径必须仍在会话目录下
+            if (!target.canonicalPath.startsWith(dir.canonicalPath + File.separator)) return null
+            target.parentFile?.mkdirs()
+            target.writeBytes(bytes)
+            target.absolutePath
+        }.getOrNull()
+    }
+
+    /** 附件行回填 localUri：按「会话 + 文件名」匹配，避免依赖包内条目顺序 */
+    private suspend fun linkAttachments(
+        files: List<Triple<String, String, String>>,
+        sessionIdMap: Map<String, String>,
+    ) {
+        if (files.isEmpty() || attachmentsRoot == null) return
+        db.withTransaction {
+            files.forEach { (originId, name, path) ->
+                val sessionId = sessionIdMap[originId] ?: return@forEach
+                dao.linkAttachmentLocalUri(sessionId, name, "file://" + path)
+            }
+        }
+    }
+
+    /** 被跳过的会话（已存在/损坏）留下的目录删掉，避免占用空间 */
+    private fun dropUnusedAttachmentDirs(
+        created: Set<String>,
+        sessionIdMap: Map<String, String>,
+    ) {
+        val root = attachmentsRoot ?: return
+        created.filter { it !in sessionIdMap }.forEach { originId ->
+            runCatching { File(root, originId).deleteRecursively() }
+        }
     }
 
     private suspend fun writeSession(session: SessionEntity, messages: List<LocalMessage>) {

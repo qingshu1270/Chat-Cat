@@ -1,6 +1,8 @@
 package com.chatcat.ui.chat
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.database.sqlite.SQLiteFullException
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -148,6 +150,10 @@ data class ChatUiState(
     val archiveNotice: String? = null,
     /** 选中备份文件后的预览，非空时进入导入确认页 */
     val importPreview: ImportPreview? = null,
+    /** 自定义头像（本机文件，只保留最新一张） */
+    val avatarUri: String? = null,
+    /** 换头像后递增，用于让图片重新解码 */
+    val avatarVersion: Long = 0L,
     /** 输入区待发送的附件（选中即上传） */
     val attachments: List<DraftAttachment> = emptyList(),
     /** 用量页：正在查看的消息 id（null 表示未打开） */
@@ -246,6 +252,7 @@ class ChatViewModel(
     private val uploadSlots = Semaphore(3)
 
     init {
+        loadAvatar()
         // 节假日：先用本地缓存，再在后台按 12 小时节流刷新（失败保留旧数据）
         viewModelScope.launch {
             runCatching {
@@ -400,6 +407,52 @@ class ChatViewModel(
         refreshKeyState()
         _state.update {
             it.copy(balanceYuan = null, balanceInfo = null, balanceSyncedAt = 0L)
+        }
+    }
+
+    /** 头像文件：固定路径，覆盖写 = 只保留最新一张 */
+    private val avatarFile: File
+        get() = File(getApplication<Application>().filesDir, "avatar.jpg")
+
+    /** 启动时若已有头像，读进来展示 */
+    private fun loadAvatar() {
+        val file = avatarFile
+        if (file.exists() && file.length() > 0) {
+            _state.update {
+                it.copy(avatarUri = Uri.fromFile(file).toString(), avatarVersion = file.lastModified())
+            }
+        }
+    }
+
+    /**
+     * 设置头像：拷贝到私有目录并覆盖旧图（不保留历史）。
+     * 大图先按 512px 采样，避免把手机原图整张读进内存。
+     */
+    fun setAvatar(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                val resolver = getApplication<Application>().contentResolver
+                val bitmap = resolver.openInputStream(uri)?.use { input ->
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+                    var sample = 1
+                    while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) sample *= 2
+                    resolver.openInputStream(uri)?.use {
+                        BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+                    }
+                }
+                if (bitmap == null) return@runCatching false
+                avatarFile.outputStream().use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                }
+                bitmap.recycle()
+                true
+            }.getOrDefault(false)
+            if (!ok) return@launch
+            val file = avatarFile
+            _state.update {
+                it.copy(avatarUri = Uri.fromFile(file).toString(), avatarVersion = file.lastModified())
+            }
         }
     }
 

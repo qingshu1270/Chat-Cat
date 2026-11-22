@@ -67,6 +67,20 @@ fun RenderProbePage(onBack: () -> Unit) {
             )
 
             Spacer(Modifier.height(14.dp))
+            Text("表格与分割线", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            MarkdownText(
+                "上一段正文，用来观察分割线上方的留白。\n\n" +
+                    "---\n\n" +
+                    "| 阶段 | 时长 | 每周投入 |\n" +
+                    "| --- | --- | --- |\n" +
+                    "| 2026.10 — 2027.5 | 8 个月 | 15-20h |\n" +
+                    "| 2027.6 — 2027.12 | 6 个月 | 3-5h |\n" +
+                    "| 2028.1 — 2028.3 | 3 个月 | 30-40h |\n\n" +
+                    "分割线下方段落，验证前后空行是否一致。",
+            )
+
+            Spacer(Modifier.height(14.dp))
             Text("块级公式", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(6.dp))
             MathBlock("x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}")

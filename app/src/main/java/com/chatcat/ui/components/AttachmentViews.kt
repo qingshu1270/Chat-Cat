@@ -31,9 +31,9 @@ import kotlinx.coroutines.withContext
  * 失败（权限失效、文件已删）返回 null，由调用方显示占位。
  */
 @Composable
-fun rememberUriImage(uri: String?, targetSize: Int = 512): ImageBitmap? {
+fun rememberUriImage(uri: String?, targetSize: Int = 512, version: Long = 0L): ImageBitmap? {
     val context = LocalContext.current
-    val state by produceState<ImageBitmap?>(initialValue = null, uri, targetSize) {
+    val state by produceState<ImageBitmap?>(initialValue = null, uri, targetSize, version) {
         value = if (uri.isNullOrBlank()) {
             null
         } else {

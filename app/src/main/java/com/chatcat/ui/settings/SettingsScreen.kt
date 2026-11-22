@@ -57,6 +57,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -113,6 +114,9 @@ fun SettingsScreen(
     archiving: Boolean,
     importProgress: Int = -1,
     importTotal: Int = 0,
+    avatarUri: String? = null,
+    avatarVersion: Long = 0L,
+    onSetAvatar: (android.net.Uri) -> Unit = {},
     archiveNotice: String?,
     importPreview: ImportPreview?,
     usageOverviewOpen: Boolean,
@@ -311,6 +315,9 @@ fun SettingsScreen(
         when (page) {
             SettingsPage.Account -> AccountPage(
                 displayName = settings.displayName,
+                avatarUri = avatarUri,
+                avatarVersion = avatarVersion,
+                onSetAvatar = onSetAvatar,
                 keySummary = apiAccounts.firstOrNull { it.current },
                 onOpenKeys = { page = SettingsPage.ApiKeys },
                 onRenameUser = onRenameUser,
@@ -514,6 +521,9 @@ fun SettingsScreen(
 @Composable
 private fun AccountPage(
     displayName: String,
+    avatarUri: String?,
+    avatarVersion: Long,
+    onSetAvatar: (android.net.Uri) -> Unit,
     keySummary: ApiAccount?,
     onOpenKeys: () -> Unit,
     onRenameUser: (String) -> Unit,
@@ -528,6 +538,61 @@ private fun AccountPage(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // 自定义头像：只保留最新一张，覆盖写入私有目录
+        val picker = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+        ) { picked -> if (picked != null) onSetAvatar(picked) }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable {
+                    picker.launch(
+                        androidx.activity.result.PickVisualMediaRequest(
+                            androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly,
+                        ),
+                    )
+                }
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val bitmap = com.chatcat.ui.components.rememberUriImage(avatarUri, 160, avatarVersion)
+            Box(
+                Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (bitmap != null) {
+                    androidx.compose.foundation.Image(
+                        bitmap = bitmap,
+                        contentDescription = "头像",
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                    )
+                } else {
+                    Text(
+                        text = "C",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(
+                    "头像",
+                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    if (avatarUri == null) "点击上传，仅保留最新一张" else "点击更换，旧头像会被替换",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         PageCard {
             // 用户名可改：只保存在本机，用于侧边栏与账号页展示
             Row(
@@ -668,42 +733,18 @@ private fun DataPage(
                 onOpenImportGuide()
             }
         }
-        Text(
-            "从官方 App 获取导出链接，自动下载并导入，无需手动找文件。",
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         Spacer(Modifier.height(8.dp))
         PageCard {
             SettingRow("导入本地 ZIP 文件") { if (!archiving) onImport() }
         }
-        Text(
-            "降级方式：选择官方导出的 deepseek_data-*.zip（v3）。导入前会先预览，并可选合并增量或覆盖。",
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         Spacer(Modifier.height(8.dp))
         PageCard {
             SettingRow("导出所有历史对话") { if (!archiving) onExport() }
         }
-        Text(
-            "导出为官方 v3 ZIP：manifest.json + chat_sessions/*.json + 会话索引，可在官方网页端或本应用导入。",
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         Spacer(Modifier.height(8.dp))
         PageCard {
             SettingRow("清理导入缓存") { onClearImportCache() }
         }
-        Text(
-            "导入失败或中途退出可能留下临时包（最大可与导出包等大）。每次启动会自动清理，这里也可以手动清。",
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         Spacer(Modifier.height(8.dp))
         PageCard {
             Row(
@@ -771,12 +812,6 @@ private fun LanguagePage(onBack: () -> Unit) {
                 Text("✓", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
             }
         }
-        Text(
-            "目前仅提供简体中文，多语言将在后续版本补充。",
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 
@@ -808,11 +843,6 @@ private fun FontSizePage(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(Modifier.height(4.dp))
-            Text(
-                "你可以拖动滑块来调整字体大小。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Spacer(Modifier.height(18.dp))
             Slider(
                 value = value,
@@ -828,11 +858,6 @@ private fun FontSizePage(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(6.dp))
-            Text(
-                "深度思考让模型在回答前先进行推理，适合复杂问题与数学计算。",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
         }
     }
 }

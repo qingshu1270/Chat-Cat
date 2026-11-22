@@ -37,8 +37,9 @@ fun SearchResultsPage(
     sources: List<ToolSource>,
     onOpen: (String) -> Unit,
     onBack: () -> Unit,
+    title: String = "搜索结果",
 ) {
-    SecondaryPage(title = "搜索结果", onBack = onBack, scrollable = false) {
+    SecondaryPage(title = title, onBack = onBack, scrollable = false) {
         Text(
             "共 ${sources.size} 个网页",
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),

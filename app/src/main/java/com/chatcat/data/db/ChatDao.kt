@@ -45,6 +45,16 @@ interface ChatDao {
     @Upsert
     suspend fun upsertAttachments(attachments: List<AttachmentEntity>)
 
+    /** 导入后回填附件本地路径（按会话 + 文件名匹配） */
+    @Query(
+        """
+        UPDATE attachments SET localUri = :uri
+        WHERE name = :name AND localUri IS NULL
+          AND messageId IN (SELECT id FROM messages WHERE sessionId = :sessionId)
+        """,
+    )
+    suspend fun linkAttachmentLocalUri(sessionId: String, name: String, uri: String)
+
     @Query("DELETE FROM attachments WHERE messageId = :messageId")
     suspend fun deleteAttachments(messageId: String)
 

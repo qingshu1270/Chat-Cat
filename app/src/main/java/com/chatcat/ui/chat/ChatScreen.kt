@@ -120,6 +120,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.SolidColor
@@ -182,6 +183,9 @@ private sealed interface ChatPage {
     /** 搜索结果页（页中页） */
     data class SearchResults(val sources: List<ToolSource>) : ChatPage
 
+    /** 已浏览页面列表（点「已浏览 N 个页面」胶囊打开，不能直接跳某一个网页） */
+    data class BrowsedPages(val pages: List<ToolSource>) : ChatPage
+
     /** 应用内浏览器 */
     data class Browser(val url: String) : ChatPage
 }
@@ -189,6 +193,7 @@ private sealed interface ChatPage {
 /** 聊天页内的导航（搜索结果页 / 内置浏览器），供深层组件直接调用 */
 private class ChatNavigator(
     val openSearch: (List<ToolSource>) -> Unit,
+    val openBrowse: (List<ToolSource>) -> Unit,
     val openUrl: (String) -> Unit,
 )
 
@@ -244,6 +249,7 @@ fun ChatScreen(
     val navigator = remember {
         ChatNavigator(
             openSearch = { sources -> page = ChatPage.SearchResults(sources) },
+            openBrowse = { pages -> page = ChatPage.BrowsedPages(pages) },
             openUrl = { url -> page = ChatPage.Browser(url) },
         )
     }
@@ -338,6 +344,8 @@ fun ChatScreen(
         drawerContent = {
             DrawerContent(
                 sessions = state.sessions,
+                avatarUri = state.avatarUri,
+                avatarVersion = state.avatarVersion,
                 currentId = state.sessionId,
                 onSelect = {
                     onSelectSession(it)
@@ -610,6 +618,13 @@ fun ChatScreen(
                     onBack = { page = null },
                 )
 
+                is ChatPage.BrowsedPages -> SearchResultsPage(
+                    sources = current.pages,
+                    title = "已浏览搜索结果",
+                    onOpen = { url -> page = ChatPage.Browser(url) },
+                    onBack = { page = null },
+                )
+
                 is ChatPage.Browser -> com.chatcat.ui.browser.BrowserPage(
                     url = current.url,
                     onClose = { page = null },
@@ -784,6 +799,8 @@ private fun ChatTopBar(
 @Composable
 private fun DrawerContent(
     sessions: List<SessionSummary>,
+    avatarUri: String?,
+    avatarVersion: Long,
     currentId: String?,
     onSelect: (String) -> Unit,
     onPin: (String, Boolean) -> Unit,
@@ -885,7 +902,7 @@ private fun DrawerContent(
             if (filtered.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     Text(
-                        "暂无对话",
+                        if (query.isBlank()) "暂无对话" else "没有找到相关内容",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -982,6 +999,7 @@ private fun DrawerContent(
                         .padding(horizontal = 18.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val avatar = com.chatcat.ui.components.rememberUriImage(avatarUri, 96, avatarVersion)
                     Box(
                         Modifier
                             .size(30.dp)
@@ -989,11 +1007,20 @@ private fun DrawerContent(
                             .background(Tokens.PillBg),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            "C",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Tokens.PillText,
-                        )
+                        if (avatar != null) {
+                            androidx.compose.foundation.Image(
+                                bitmap = avatar,
+                                contentDescription = "头像",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Text(
+                                "C",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Tokens.PillText,
+                            )
+                        }
                     }
                     Spacer(Modifier.width(10.dp))
                     Column {
@@ -1826,62 +1853,76 @@ private fun ToolGroupStep(blocks: List<UiBlock>) {
     val searches = infos.filter { it.isSearch }
     val fetches = infos.filter { it.isFetch }
     val sources = searches.flatMap { it.sources }
-    val reading = fetches.count { it.url != null || it.title != null }
+    val pages = fetches.mapNotNull { f ->
+        f.url?.let { url -> ToolSource(title = f.title?.takeIf { it.isNotBlank() } ?: url, url = url) }
+    }.distinctBy { it.url }
+    val browsing = fetches.isNotEmpty() && pages.isEmpty()
 
-    val label = buildString {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         when {
-            sources.isNotEmpty() -> append("搜索到 ${sources.size} 个网页")
-            searches.isNotEmpty() -> append("正在搜索…")
+            sources.isNotEmpty() -> ToolChip(
+                icon = Icons.Outlined.Search,
+                text = "搜索到 ${sources.size} 个网页",
+                icons = sources,
+                onClick = { nav?.openSearch(sources) },
+            )
+            searches.isNotEmpty() -> ToolChip(
+                icon = Icons.Outlined.Search,
+                text = "正在搜索…",
+                onClick = null,
+            )
         }
-        if (reading > 0) {
-            if (isNotEmpty()) append(" · ")
-            append("已浏览 $reading 个页面")
-        } else if (fetches.isNotEmpty()) {
-            if (isNotEmpty()) append(" · ")
-            append("正在浏览…")
+        when {
+            pages.isNotEmpty() -> ToolChip(
+                icon = Icons.Outlined.Link,
+                text = "已浏览 ${pages.size} 个页面",
+                icons = pages,
+                onClick = { nav?.openBrowse(pages) },
+            )
+            browsing -> ToolChip(
+                icon = Icons.Outlined.Link,
+                text = "正在浏览…",
+                onClick = null,
+            )
         }
     }
-    if (label.isBlank()) return
+}
 
-    val targetUrl = fetches.firstNotNullOfOrNull { it.url }
-    val openAction: (() -> Unit)? = when {
-        sources.isNotEmpty() -> ({ nav?.openSearch(sources) })
-        targetUrl != null -> ({ nav?.openUrl(targetUrl) })
-        else -> null
-    }
-
+/** 思维链里的工具胶囊：图标 + 文案 + 叠压站点圆标 + 右箭头 */
+@Composable
+private fun ToolChip(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    text: String,
+    icons: List<ToolSource> = emptyList(),
+    onClick: (() -> Unit)?,
+) {
     Row(
         Modifier
             .clip(RoundedCornerShape(50))
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-            .then(
-                if (openAction != null) Modifier.clickable(onClick = openAction) else Modifier,
-            )
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = if (searches.isNotEmpty()) Icons.Outlined.Search else Icons.Outlined.Link,
+            imageVector = icon,
             contentDescription = null,
             modifier = Modifier.size(13.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.width(5.dp))
         Text(
-            text = label,
+            text = text,
             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 12.5.sp),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
         )
-        // 参考官方：胶囊后面叠几个来源站点的小圆标
-        val iconSources = sources.ifEmpty { fetches.mapNotNull { f -> f.url?.let { ToolSource(title = f.title ?: it, url = it) } } }
-        if (iconSources.isNotEmpty()) {
+        if (icons.isNotEmpty()) {
             Spacer(Modifier.width(6.dp))
-            SiteIconStack(iconSources)
+            SiteIconStack(icons)
         }
-        if (openAction != null) {
+        if (onClick != null) {
             Icon(
                 Icons.Outlined.KeyboardArrowRight,
                 contentDescription = null,
@@ -1899,10 +1940,10 @@ private fun SiteIconStack(sources: List<ToolSource>) {
         Color(0xFF4F8DF7), Color(0xFF34A853), Color(0xFFF2994A),
         Color(0xFF9B51E0), Color(0xFFEB5757), Color(0xFF2D9CDB),
     )
+    // 叠压用 spacedBy 的负间距：Compose 不允许负 padding（会抛 IllegalArgumentException 直接崩溃）
     Row(
-        verticalAlignment = Alignment.CenterVertically,
-        // 负间距实现叠压；不要用负 padding，Compose 会抛 IllegalArgumentException
         horizontalArrangement = Arrangement.spacedBy((-5).dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         sources.take(3).forEach { source ->
             val host = runCatching { java.net.URI(source.url).host }.getOrNull()
@@ -2290,39 +2331,38 @@ private fun DraftFileCard(item: DraftAttachment, onRetry: (String) -> Unit) {
     }
 }
 
-/** 用户消息内的附件：图片按三列缩略图，其余用信息卡 */
+/**
+ * 用户消息内的附件：**横排一行、可左右滑动**（对齐官方）。
+ */
 @Composable
 private fun UserAttachments(
     attachments: List<UiAttachment>,
     onPreviewImage: (String) -> Unit,
 ) {
-    val images = attachments.filter { it.isImage }
-    val files = attachments.filterNot { it.isImage }
-
-    Column(horizontalAlignment = Alignment.End) {
-        images.chunked(3).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                row.forEach { image ->
-                    AttachmentImage(
-                        uri = image.localUri,
-                        modifier = Modifier
-                            .size(96.dp)
-                            .clickable(enabled = !image.localUri.isNullOrBlank()) {
-                                image.localUri?.let(onPreviewImage)
-                            },
-                        corner = 12,
-                    )
-                }
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        items(attachments, key = { it.id }) { item ->
+            if (item.isImage) {
+                AttachmentImage(
+                    uri = item.localUri,
+                    modifier = Modifier
+                        .size(96.dp)
+                        .clickable(enabled = !item.localUri.isNullOrBlank()) {
+                            item.localUri?.let(onPreviewImage)
+                        },
+                    corner = 12,
+                )
+            } else {
+                FileMessageCard(item)
             }
-            Spacer(Modifier.height(4.dp))
-        }
-        files.forEach { file ->
-            FileMessageCard(file)
-            Spacer(Modifier.height(4.dp))
         }
     }
 }
 
+/** 文件卡：窄条样式（图标 + 文件名 + 类型·大小），与官方一致 */
 @Composable
 private fun FileMessageCard(file: UiAttachment) {
     Surface(
@@ -2331,31 +2371,34 @@ private fun FileMessageCard(file: UiAttachment) {
         } else {
             MaterialTheme.colorScheme.surfaceVariant
         },
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
     ) {
         Row(
-            Modifier.padding(10.dp).widthIn(max = 250.dp),
+            Modifier
+                .width(196.dp)
+                .height(56.dp)
+                .padding(horizontal = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(9.dp))
                     .background(MaterialTheme.colorScheme.surface),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     Icons.Outlined.Description,
                     contentDescription = null,
-                    modifier = Modifier.size(19.dp),
+                    modifier = Modifier.size(17.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Spacer(Modifier.width(9.dp))
-            Column(Modifier.widthIn(max = 190.dp)) {
+            Column(Modifier.weight(1f)) {
                 Text(
                     text = file.name,
-                    fontSize = 14.sp,
+                    fontSize = 13.5.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -2366,6 +2409,7 @@ private fun FileMessageCard(file: UiAttachment) {
                         .joinToString(" · "),
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
         }

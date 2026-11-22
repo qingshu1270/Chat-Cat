@@ -7,12 +7,13 @@ import com.chatcat.data.ChatRepository
 import com.chatcat.data.archive.ChatArchive
 import com.chatcat.data.archive.ImportCache
 import com.chatcat.data.db.AppDatabase
+import com.chatcat.data.holiday.HolidayRepository
 import com.chatcat.data.prefs.SettingsStore
 import com.chatcat.data.remote.FilesApi
 import com.chatcat.data.remote.BalanceApi
-import com.chatcat.data.holiday.HolidayRepository
 import com.chatcat.data.remote.MessagesApi
 import com.chatcat.domain.context.ContextAssembler
+import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,13 +34,12 @@ class AppContainer(private val context: Context) {
         AppDatabase.MIGRATION_1_2,
         AppDatabase.MIGRATION_2_3,
         AppDatabase.MIGRATION_3_4,
+        AppDatabase.MIGRATION_4_5,
     ).build()
 
     val repository = ChatRepository(database)
-
-    /** 节假日数据：在线拉取 + 本地缓存（12 小时内不重复请求） */
-    val holidays by lazy { HolidayRepository(httpClient, settings) }
-    val archive = ChatArchive(database)
+    /** 导入的官方附件落在私有目录，随应用卸载一起清理 */
+    val archive = ChatArchive(database, File(context.filesDir, "attachments"))
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -48,6 +48,9 @@ class AppContainer(private val context: Context) {
         .callTimeout(0, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
+
+    /** 节假日数据：在线拉取 + 本地缓存（12 小时内不重复请求） */
+    val holidays by lazy { HolidayRepository(httpClient, settings) }
 
     val messagesApi = MessagesApi(httpClient)
     val filesApi = FilesApi(httpClient)
