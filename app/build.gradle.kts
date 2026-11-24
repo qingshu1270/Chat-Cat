@@ -25,8 +25,8 @@ android {
         applicationId = "com.chatcat"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1060200
-        versionName = "1.6.2"
+        versionCode = 1061300
+        versionName = "1.6.13"
         // 应用显示名由构建类型覆盖：正式版「Chat Cat」，beta 版「Chat Cat Beta」
         buildConfigField("String", "APP_DISPLAY_NAME", "\"Chat Cat\"")
         manifestPlaceholders["appLabel"] = "@string/app_name"

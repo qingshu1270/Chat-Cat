@@ -1,5 +1,8 @@
 package com.chatcat.ui.settings
 
+import android.widget.Toast
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -106,6 +109,7 @@ private sealed interface SettingsPage {
     data object Licenses : SettingsPage
     data object Integrity : SettingsPage
     data object RenderProbe : SettingsPage
+    data object DevTools : SettingsPage
 }
 
 @Composable
@@ -117,6 +121,9 @@ fun SettingsScreen(
     avatarUri: String? = null,
     avatarVersion: Long = 0L,
     onSetAvatar: (android.net.Uri) -> Unit = {},
+    onSetDevMode: (Boolean) -> Unit = {},
+    onRevealTuning: (Int, Int, Int) -> Unit = { _, _, _ -> },
+    onOpenPreview: () -> Unit = {},
     archiveNotice: String?,
     importPreview: ImportPreview?,
     usageOverviewOpen: Boolean,
@@ -257,6 +264,20 @@ fun SettingsScreen(
                     }
                 }
 
+                if (settings.devMode) {
+                    SectionTitle("开发者")
+                    SettingsCard {
+                        SettingRow(
+                            "渲染预览",
+                            "内置问答 · 不消耗 token",
+                        ) { onOpenPreview() }
+                        SettingRow(
+                            "流式揭示",
+                            "${settings.revealMaxStep} 字/帧 · ${settings.revealDrainFrames} 帧 · 限高 ${settings.revealPanelHeight}dp",
+                        ) { page = SettingsPage.DevTools }
+                    }
+                }
+
                 SectionTitle("关于")
                 SettingsCard {
                     SettingRow("版本", "v${BuildConfig.VERSION_NAME}") {
@@ -372,7 +393,19 @@ fun SettingsScreen(
                 onBack = { page = null },
             )
 
+            SettingsPage.DevTools -> DevToolsPage(
+                maxStep = settings.revealMaxStep,
+                drainFrames = settings.revealDrainFrames,
+                panelHeight = settings.revealPanelHeight,
+                onTuning = onRevealTuning,
+                onOpenPreview = onOpenPreview,
+                onCloseDevMode = { onSetDevMode(false) },
+                onBack = { page = null },
+            )
+
             SettingsPage.About -> AboutPage(
+                devMode = settings.devMode,
+                onToggleDevMode = onSetDevMode,
                 onBack = { page = null },
                 onOpenRenderProbe = { page = SettingsPage.RenderProbe },
             )
@@ -918,14 +951,151 @@ private fun PersonalPage(
     }
 }
 
+/**
+ * 开发者工具：调流式揭示的节奏、进渲染预览。
+ *
+ * 放在「关于 → 作者连点 9 次」之后，普通用户看不到；后续开发者功能都挂这里。
+ */
 @Composable
-private fun AboutPage(onBack: () -> Unit, onOpenRenderProbe: () -> Unit) {
+private fun DevToolsPage(
+    maxStep: Int,
+    drainFrames: Int,
+    panelHeight: Int,
+    onTuning: (Int, Int, Int) -> Unit,
+    onOpenPreview: () -> Unit,
+    onCloseDevMode: () -> Unit,
+    onBack: () -> Unit,
+) {
+    SecondaryPage(title = "开发者工具", onBack = onBack) {
+        Text(
+            "调完直接生效，返回对话再发一条即可对比手感。预览页用的是本地模拟数据，不会请求接口、不消耗 token。",
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        SectionTitle("流式揭示")
+        PageCard {
+            StepperRow(
+                label = "每帧上限",
+                value = maxStep,
+                unit = "字/帧",
+                range = 1..16,
+                onChange = { onTuning(it, drainFrames, panelHeight) },
+            )
+            StepperRow(
+                label = "追平帧数",
+                value = drainFrames,
+                unit = "帧",
+                range = 8..40,
+                onChange = { onTuning(maxStep, it, panelHeight) },
+            )
+        }
+        Text(
+            "字/帧 越小越顺（但追不上生成），越大越跟手（但一帧的字更多）；追平帧数是积压的消化时间，60fps 下 20 帧≈330ms。",
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        SectionTitle("思维链限高区")
+        PageCard {
+            StepperRow(
+                label = "限高高度",
+                value = panelHeight,
+                unit = "dp",
+                range = 100..320,
+                step = 20,
+                onChange = { onTuning(maxStep, drainFrames, it) },
+            )
+        }
+        Text(
+            "「思考中」时思维链只露出这么多高度，超出部分内部滚动；调小更省视线，调大看得更全。",
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        SectionTitle("预览")
+        SettingsCard {
+            SettingRow("渲染预览", "内置问答") { onOpenPreview() }
+        }
+
+        SectionTitle("其他")
+        SettingsCard {
+            SettingRow("关闭开发者模式", null) { onCloseDevMode() }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+/** 开发者页的「步进」行：- 值 + */
+@Composable
+private fun StepperRow(
+    label: String,
+    value: Int,
+    unit: String,
+    range: IntRange,
+    step: Int = 1,
+    onChange: (Int) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
+        )
+        Text(
+            "$value $unit",
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(6.dp))
+        TextButton(onClick = { onChange((value - step).coerceIn(range)) }) { Text("−") }
+        TextButton(onClick = { onChange((value + step).coerceIn(range)) }) { Text("+") }
+    }
+}
+
+@Composable
+private fun AboutPage(
+    devMode: Boolean,
+    onToggleDevMode: (Boolean) -> Unit,
+    onBack: () -> Unit,
+    onOpenRenderProbe: () -> Unit,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    // 连点作者栏 9 次进入开发者模式（隐藏入口，不上屏任何提示文案以外的痕迹）
+    var taps by remember { mutableIntStateOf(0) }
+    var lastTapAt by remember { mutableLongStateOf(0L) }
     SecondaryPage(title = "关于", onBack = onBack) {
         Spacer(Modifier.height(12.dp))
         // 置顶：作者与开源出处（按项目要求不给出具体仓库链接）
         PageCard {
-            InfoRow("作者", "qingshu")
+            // 作者行是开发者模式的隐藏入口：3 秒内连点 9 次
+            Box(
+                Modifier.clickable {
+                    val now = System.currentTimeMillis()
+                    taps = if (now - lastTapAt > 3000) 1 else taps + 1
+                    lastTapAt = now
+                    if (taps >= 9) {
+                        taps = 0
+                        val next = !devMode
+                        onToggleDevMode(next)
+                        Toast.makeText(
+                            context,
+                            if (next) "开发者模式已开启" else "开发者模式已关闭",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                },
+            ) {
+                InfoRow("作者", "qingshu")
+            }
             InfoRow("开源平台", "GitHub · Gitee")
         }
         Text(

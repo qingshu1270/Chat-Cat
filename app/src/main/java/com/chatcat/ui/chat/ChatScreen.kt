@@ -16,7 +16,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -29,11 +28,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -44,7 +43,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -107,9 +105,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -373,8 +374,7 @@ fun ChatScreen(
             )
         },
     ) {
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
+        ChatChrome(
             topBar = {
                 ChatTopBar(
                     title = if (state.visibleMessages.isEmpty()) "" else title,
@@ -433,35 +433,22 @@ fun ChatScreen(
             },
         ) { padding ->
             Box(Modifier.fillMaxSize()) {
-            val listState = rememberLazyListState()
             val messages = state.visibleMessages
+            // 列表底部就是布局锚点（reverseLayout），进会话即停在最新一条，
+            // 流式增长不需要追滚动，键盘弹起也跟着锚点走
+            val controller = rememberChatListController(sessionKey = state.sessionId.orEmpty())
+            val listState = controller.listState
             val canScrollDown by remember {
-                derivedStateOf { listState.canScrollForward }
+                derivedStateOf { !controller.atLatest }
+            }
+            // 发送/重新生成时回到最新一条（用户可能正翻着历史）
+            LaunchedEffect(state.streaming) {
+                if (state.streaming && messages.isNotEmpty()) {
+                    controller.scrollToLatest(animated = false)
+                }
             }
             val keyboard = LocalSoftwareKeyboardController.current
             val focus = LocalFocusManager.current
-            // 用户上滑查看历史时停止自动跟随；回到底部或发送后恢复
-            var follow by remember { mutableStateOf(true) }
-
-            LaunchedEffect(listState) {
-                // 手指一拖动就停止跟随，松手时若已在底部再恢复
-                listState.interactionSource.interactions.collect { interaction ->
-                    when (interaction) {
-                        is DragInteraction.Start -> follow = false
-                        is DragInteraction.Stop, is DragInteraction.Cancel ->
-                            follow = !listState.canScrollForward
-                        else -> Unit
-                    }
-                }
-            }
-            LaunchedEffect(state.streaming) {
-                if (state.streaming) follow = true
-            }
-            LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
-                if (messages.isNotEmpty() && follow) {
-                    listState.scrollToBottom(messages.lastIndex)
-                }
-            }
 
             if (messages.isEmpty()) {
                 EmptyState(
@@ -473,22 +460,24 @@ fun ChatScreen(
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .padding(padding),
+                        .padding(padding)
+                        // Scaffold 已经替我们吃掉了顶栏/输入区的占位，
+                        // 这里再 consume 一次，避免子级重复加系统栏内边距
+                        .consumeWindowInsets(padding),
                 ) {
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
+                        // 底部锚定：item 0 落在最下面，新内容从底部往上长。
+                        // 这是「进会话不闪、换行不二次位移、键盘弹出自动同步」的前提。
+                        reverseLayout = true,
                         contentPadding = PaddingValues(
-                            start = 16.dp, end = 16.dp, top = 6.dp, bottom = 16.dp,
+                            start = 16.dp, end = 16.dp, top = 16.dp, bottom = 6.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(20.dp),
                     ) {
-                        if (!state.hasKey) {
-                            item(key = "api-prompt") {
-                                ApiPromptBanner(onOpenApiSetup = onOpenApiSetup)
-                            }
-                        }
-                        items(messages, key = { it.id }) { message ->
+                        // reverseLayout 下声明顺序 = 从下往上，所以数据要「新→旧」
+                        items(messages.asReversed(), key = { it.id }) { message ->
                             MessageItem(
                                 message = message,
                                 thinkingDisplay = state.settings.thinkingDisplay,
@@ -508,6 +497,12 @@ fun ChatScreen(
                                 onPreviewImage = { uri -> page = ChatPage.ImagePreview(uri) },
                             )
                         }
+                        // 视觉上的最顶部：reverseLayout 下声明顺序是从下往上，所以放最后
+                        if (!state.hasKey) {
+                            item(key = "api-prompt") {
+                                ApiPromptBanner(onOpenApiSetup = onOpenApiSetup)
+                            }
+                        }
                     }
                     if (canScrollDown) {
                         Box(
@@ -525,10 +520,7 @@ fun ChatScreen(
                                 .clickable {
                                     focus.clearFocus()
                                     keyboard?.hide()
-                                    follow = true
-                                    scope.launch {
-                                        listState.scrollToBottom(messages.lastIndex)
-                                    }
+                                    scope.launch { controller.scrollToLatest(animated = true) }
                                 },
                             contentAlignment = Alignment.Center,
                         ) {
@@ -1023,17 +1015,15 @@ private fun DrawerContent(
                         }
                     }
                     Spacer(Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            displayName.ifBlank { "Chat Cat" },
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Text(
-                            "第三方客户端",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    // 单行用户名，不再挂「第三方客户端」小字
+                    Text(
+                        text = displayName.ifBlank { "Chat Cat" },
+                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
                 }
             }
         }
@@ -1327,7 +1317,7 @@ private fun EmptyState(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageItem(
+internal fun MessageItem(
     message: UiMessage,
     thinkingDisplay: String,
     feedback: Int,
@@ -1351,7 +1341,7 @@ private fun MessageItem(
                 Box {
                     Column(
                         // 正文保护：只有长按才唤起菜单，点击/拖动不会与正文产生交互
-                        modifier = Modifier.pointerInput(message.id) {
+                        modifier = Modifier.pointerInput(Unit) {
                             detectTapGestures(onLongPress = { menu = true })
                         },
                         horizontalAlignment = Alignment.End,
@@ -1413,20 +1403,27 @@ private fun MessageItem(
             var menu by remember { mutableStateOf(false) }
             val clipboard = LocalClipboardManager.current
             val context = LocalContext.current
+            // 手势闭包需要读到「最新」的流式状态，而不是首次组合时的快照
+            val streamingState = rememberUpdatedState(message.isStreaming)
             Box {
                 Column(
                     // 正文保护：默认不可选中、不可点链接，长按只负责唤起菜单
                     Modifier
                         .fillMaxWidth()
-                        .pointerInput(message.id) {
+                        // pointerInput 的 lambda 只在 key 变化时重新注册，
+                        // 直接捕获 message.isStreaming 会把「首次组合时的 true」冻住（生成完也弹不出菜单）。
+                        // 用 rememberUpdatedState 让闭包每次读最新值，key 固定 Unit 不重启手势。
+                        .pointerInput(Unit) {
                             detectTapGestures(
-                                onLongPress = { if (!message.isStreaming) menu = true },
+                                onLongPress = { if (!streamingState.value) menu = true },
                             )
                         },
                 ) {
-            val thinkingActive = message.isStreaming && message.blocks
-                .filter { it.isThinking }
-                .let { list -> list.isEmpty() || list.any { !it.closed } }
+            // 「思考中」= 仍在流式且正文还没开始。
+            // 不能只看思考块 closed：协议在工具块（搜索/浏览胶囊）之前就会 close 掉当前思考块，
+            // 用它判定会让思维链在胶囊出现时「收起 → 再展开」，来回抖动一次。
+            // 正文一开始输出就不再算思考中，所以这里不会一直挂着展开。
+            val thinkingActive = message.isStreaming && message.text.isBlank()
             if (message.thinking.isNotBlank() || thinkingActive) {
                 ThinkingRow(message, thinkingActive, thinkingDisplay)
                 Spacer(Modifier.height(6.dp))
@@ -1438,6 +1435,7 @@ private fun MessageItem(
                     message.textWithCitations,
                     linksClickable = true,
                     sources = message.sources,
+                    streaming = message.isStreaming,
                 )
             }
             if (!message.isStreaming && message.sources.isNotEmpty()) {
@@ -1714,22 +1712,33 @@ private fun VersionSwitcher(message: UiMessage, onSwitchVersion: (String, Int) -
 
 @Composable
 private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDisplay: String) {
-    // 用户手动点过就以手动为准；没点过则按模式自动决定（chat-demo 的基本逻辑）
-    var userExpanded by rememberSaveable(message.id) { mutableStateOf<Boolean?>(null) }
+    // 面板三态：限高滚动（默认）／全展开／收起成一行标题。
+    // 用户点过就固定，不再被自动规则改动——旧实现是「展开/收起」二元且随思考状态自动翻转，
+    // 工具块一来就会自动收起再展开，视觉上像闪一下重来。
+    var userPanel by rememberSaveable(message.id) { mutableStateOf<String?>(null) }
     var tick by remember { mutableLongStateOf(0L) }
 
-    // 思考中：除「默认收起」外都展开；结束后：除「默认展开」外都收起。
-    // 一旦用户手动展开/收起，就固定住，不再被自动规则覆盖（这正是旧实现会「弹回收起」的原因）。
-    val autoExpanded = if (thinkingActive) {
-        thinkingDisplay != AppSettings.THINKING_COLLAPSED
-    } else {
-        thinkingDisplay == AppSettings.THINKING_FULL
+    val autoPanel = when {
+        thinkingDisplay == AppSettings.THINKING_COLLAPSED -> PANEL_HIDDEN
+        // 「默认展开全部」：一直全展开，不再限高
+        thinkingDisplay == AppSettings.THINKING_FULL -> PANEL_FULL
+        // 默认（限高）：流式中限高滚动，结束后收起成标题
+        message.isStreaming -> PANEL_LIMITED
+        else -> PANEL_HIDDEN
     }
-    val expanded = userExpanded ?: autoExpanded
+    val panel = userPanel ?: autoPanel
+    val showContent = panel != PANEL_HIDDEN
+    val limited = panel == PANEL_LIMITED
+    // 点一下展开全部，再点回到「限高/收起」——不会一点就整块消失
+    val onToggle = {
+        userPanel = if (panel == PANEL_FULL) {
+            if (message.isStreaming) PANEL_LIMITED else PANEL_HIDDEN
+        } else {
+            PANEL_FULL
+        }
+    }
 
     val scroll = rememberScrollState()
-    // 思考进行中始终是限高滚动；「默认展开」模式下不限高
-    val limited = thinkingActive && thinkingDisplay != AppSettings.THINKING_FULL
 
     LaunchedEffect(thinkingActive) {
         if (thinkingActive) {
@@ -1740,9 +1749,22 @@ private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDis
         }
     }
 
-    // 只按内容长度分档触发，避免每个 token 都 animate 造成的掉帧
-    LaunchedEffect(message.thinking.length / 48, message.blocks.size, limited) {
-        if (limited && expanded) scroll.scrollTo(scroll.maxValue)
+    // 限高窗口 = 只负责「把内容缓动顶上去」的取景框，不接受手势、也不做「拖动后暂停」。
+    // 用户想看前面的内容，点标题切到全展开（PANEL_FULL）即可——那里跟随页面滚动，
+    // 拖动暂停跟随是页面列表的职责（见聊天页的 listState 交互监听）。
+    LaunchedEffect(limited, showContent) {
+        if (!limited || !showContent) return@LaunchedEffect
+        while (true) {
+            withFrameNanos { }
+            val max = scroll.maxValue
+            val value = scroll.value
+            if (max > value) {
+                // 差距大追得快、差距小慢慢贴上去，避免一顿一顿地跳
+                val delta = max - value
+                val step = if (delta > 240) delta / 2 else (delta * 0.45f).toInt().coerceAtLeast(6)
+                scroll.scrollTo((value + step).coerceAtMost(max))
+            }
+        }
     }
 
     val seconds = when {
@@ -1762,7 +1784,7 @@ private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDis
         Row(
             Modifier
                 .clip(RoundedCornerShape(12.dp))
-                .clickable { userExpanded = !expanded }
+                .clickable { onToggle() }
                 .padding(vertical = 4.dp, horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1772,7 +1794,7 @@ private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDis
                 color = Tokens.GrayText,
             )
             Icon(
-                imageVector = if (expanded) {
+                imageVector = if (showContent) {
                     Icons.Outlined.KeyboardArrowDown
                 } else {
                     Icons.Outlined.KeyboardArrowRight
@@ -1782,18 +1804,19 @@ private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDis
                 tint = Tokens.GrayText,
             )
         }
-        if (expanded && (hasThinking || hasTools)) {
+        if (showContent && (hasThinking || hasTools)) {
             val lineColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f)
             // 只在「思考中・限高」时内部滚动；展开后恢复正文式自然滚动（官方设计）
             val contentModifier = Modifier
                 .fillMaxWidth()
-                .then(if (limited) Modifier.heightIn(max = 260.dp) else Modifier)
+                .then(if (limited) Modifier.heightIn(max = LocalThinkingPanelHeight.current) else Modifier)
                 .drawBehind {
                     val lineWidth = 2.dp.toPx()
                     drawRect(color = lineColor, size = Size(lineWidth, size.height))
                 }
                 .padding(start = 14.dp, top = 4.dp, bottom = 4.dp, end = 2.dp)
-                .then(if (limited) Modifier.verticalScroll(scroll) else Modifier)
+                // 限高时不接受手势：内容只跟着流式走；要看前文就点标题展开成全展开
+                .then(if (limited) Modifier.verticalScroll(scroll, enabled = false) else Modifier)
             Box(contentModifier) {
                 Column {
                     var index = 0
@@ -1818,6 +1841,7 @@ private fun ThinkingRow(message: UiMessage, thinkingActive: Boolean, thinkingDis
                                 // 思考链内也走 Markdown（粗体/列表/行内代码/公式），避免露出 ** 等符号
                                 MarkdownText(
                                     text = block.text,
+                                    streaming = thinkingActive,
                                     fontSize = 14.sp,
                                     lineHeight = 24.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
@@ -1887,6 +1911,11 @@ private fun ToolGroupStep(blocks: List<UiBlock>) {
         }
     }
 }
+
+/** 思维链面板三态：限高滚动 / 全展开 / 收起成标题行 */
+private const val PANEL_LIMITED = "limited"
+private const val PANEL_FULL = "full"
+private const val PANEL_HIDDEN = "hidden"
 
 /** 思维链里的工具胶囊：图标 + 文案 + 叠压站点圆标 + 右箭头 */
 @Composable
@@ -2013,7 +2042,7 @@ private fun NoticeCard(text: String) {
 }
 
 @Composable
-private fun Composer(
+internal fun Composer(
     showDisclaimer: Boolean,
     input: String,
     streaming: Boolean,
@@ -2038,7 +2067,6 @@ private fun Composer(
         Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .imePadding()
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Surface(
@@ -2599,7 +2627,6 @@ private fun EditComposer(
         Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .imePadding()
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Surface(
@@ -2932,11 +2959,6 @@ private fun PageDangerButton(text: String, onClick: () -> Unit) {
  * 这样既没有动画中间态（此前「先到顶部」的来源），也不依赖可能未稳定的 layoutInfo
  * 做多次补偿（此前「到底但不是最底部」的来源）。取 Int.MAX_VALUE/4 避免整数溢出。
  */
-private suspend fun LazyListState.scrollToBottom(index: Int) {
-    if (index < 0) return
-    scrollToItem(index = index, scrollOffset = Int.MAX_VALUE / 4)
-}
-
 private data class SessionGroup(val label: String, val items: List<SessionSummary>)
 
 private fun buildGroups(sessions: List<SessionSummary>): List<SessionGroup> {

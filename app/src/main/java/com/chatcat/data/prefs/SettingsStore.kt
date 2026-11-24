@@ -49,6 +49,14 @@ data class AppSettings(
     val holidayDates: String = "",
     /** 上次拉取节假日数据的时间（毫秒） */
     val holidayFetchedAt: Long = 0L,
+    /** 开发者模式（「关于」页作者栏连点 9 次开启），后续开发者功能都挂在这里 */
+    val devMode: Boolean = false,
+    /** 流式揭示：单帧最多上屏多少字（越小越顺，越大越追得上） */
+    val revealMaxStep: Int = 6,
+    /** 流式揭示：积压多少帧追平（越小越急，越大越稳） */
+    val revealDrainFrames: Int = 20,
+    /** 思维链限高区高度（dp）：只在「思考中・限高」时生效，开发者可调 */
+    val revealPanelHeight: Int = 168,
 ) {
     companion object {
         const val DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -137,6 +145,10 @@ class SettingsStore(private val context: Context) {
         termsVersion = this[KEY_TERMS_VERSION] ?: 0,
         holidayDates = this[KEY_HOLIDAY_DATES] ?: "",
         holidayFetchedAt = this[KEY_HOLIDAY_FETCHED_AT] ?: 0L,
+        devMode = this[KEY_DEV_MODE] ?: false,
+        revealMaxStep = this[KEY_REVEAL_MAX_STEP] ?: 6,
+        revealDrainFrames = this[KEY_REVEAL_DRAIN_FRAMES] ?: 20,
+        revealPanelHeight = this[KEY_REVEAL_PANEL_HEIGHT] ?: 168,
     )
 
     /** 一次性读取当前设置快照（用于启动时同步缓存类数据） */
@@ -157,6 +169,10 @@ class SettingsStore(private val context: Context) {
             p[KEY_DISPLAY_NAME] = next.displayName
             p[KEY_FONT_SCALE] = next.fontScale
             p[KEY_BALANCE_WARN] = next.balanceWarn
+            p[KEY_DEV_MODE] = next.devMode
+            p[KEY_REVEAL_MAX_STEP] = next.revealMaxStep
+            p[KEY_REVEAL_DRAIN_FRAMES] = next.revealDrainFrames
+            p[KEY_REVEAL_PANEL_HEIGHT] = next.revealPanelHeight
             next.lastSessionId?.let { p[KEY_LAST_SESSION] = it } ?: p.remove(KEY_LAST_SESSION)
         }
     }
@@ -298,5 +314,9 @@ class SettingsStore(private val context: Context) {
         val KEY_DISPLAY_NAME = stringPreferencesKey("display_name")
         val KEY_FONT_SCALE = floatPreferencesKey("font_scale")
         val KEY_BALANCE_WARN = floatPreferencesKey("balance_warn")
+        val KEY_DEV_MODE = booleanPreferencesKey("dev_mode")
+        val KEY_REVEAL_MAX_STEP = intPreferencesKey("reveal_max_step")
+        val KEY_REVEAL_DRAIN_FRAMES = intPreferencesKey("reveal_drain_frames")
+        val KEY_REVEAL_PANEL_HEIGHT = intPreferencesKey("reveal_panel_height")
     }
 }

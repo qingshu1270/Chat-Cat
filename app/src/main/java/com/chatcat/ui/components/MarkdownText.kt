@@ -112,10 +112,24 @@ fun MarkdownText(
     mathSize: TextUnit = TextUnit.Unspecified,
     /** 本轮来源列表：用于把模型自带的角标统一改成本轮 1..N 的序号 */
     sources: List<ToolSource> = emptyList(),
+    /** 正在流式输出：走自适应节流，避免每次 token 都整段重解析把帧挤爆 */
+    streaming: Boolean = false,
 ) {
+    // 字符级揭示：渲染的是「目标文本的前缀」，每帧只长几个字——这是「流」而不是「蹦」的关键。
+    // 完成后直接给全文，不做动画（历史消息不该在打开时重播）。
+    val revealed = rememberRevealedText(text, streaming)
+    // 尾巴上未闭合的语法先临时补齐，避免「先露 ** 再跳变」。
+    val visible = remember(revealed, streaming) {
+        if (streaming) closeOpenMarkdown(revealed) else revealed
+    }
     // 模型有时会在正文里直接写 [440](url) 这类角标，且常常出现在行首，
     // 会把「### 标题」「- 列表」挤到行中导致 Markdown 失效。这里先做统一归一化。
-    val normalized = remember(text, sources) { normalizeCitations(text, sources) }
+    // 只对「已揭示的前缀」做，角标编号随后续内容变化会重排一次，但揭示游标在原文上单调，
+    // 不会触发「从头重播」。
+    val hasCitation = visible.contains("](")
+    val normalized = remember(visible, sources, hasCitation) {
+        if (hasCitation) normalizeCitations(visible, sources) else visible
+    }
     val segments = remember(normalized) { splitSegments(normalized) }
     val base = MaterialTheme.typography.bodyLarge
     val bodyStyle = base.copy(
@@ -161,7 +175,7 @@ private fun MarkdownBlocks(
                 is Block.Heading -> {
                     Spacer(Modifier.height((if (block.level == 1) 14.dp else 10.dp) * gap))
                     Text(
-                        text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
+                        text = rememberInline(block.text, linksClickable, codeColor, citeBg, citeColor),
                         style = if (compact) {
                             bodyStyle.copy(fontSize = bodyStyle.fontSize * 1.05f, fontWeight = FontWeight.SemiBold)
                         } else {
@@ -186,7 +200,7 @@ private fun MarkdownBlocks(
 
                 is Block.Paragraph -> {
                     Text(
-                        text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
+                        text = rememberInline(block.text, linksClickable, codeColor, citeBg, citeColor),
                         style = bodyStyle,
                         color = textColor,
                     )
@@ -204,7 +218,7 @@ private fun MarkdownBlocks(
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
+                            text = rememberInline(block.text, linksClickable, codeColor, citeBg, citeColor),
                             style = bodyStyle,
                             color = textColor,
                         )
@@ -221,7 +235,7 @@ private fun MarkdownBlocks(
                             color = textColor,
                         )
                         Text(
-                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
+                            text = rememberInline(block.text, linksClickable, codeColor, citeBg, citeColor),
                             style = bodyStyle,
                             color = textColor,
                         )
@@ -259,7 +273,9 @@ private fun MarkdownBlocks(
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = inline(block.text, MaterialTheme.colorScheme.primary, linksClickable, codeColor, citeBg, citeColor),
+                            text = rememberInline(block.text, linksClickable, codeColor, citeBg, citeColor),
+                            // 引用里常有长链接：不加 weight 会按「一行」测量，右侧直接被裁掉
+                            modifier = Modifier.weight(1f),
                             style = bodyStyle,
                             color = textColor.copy(alpha = 0.75f),
                         )
@@ -778,6 +794,28 @@ private fun isTableSeparator(line: String): Boolean {
 
 private fun splitTableRow(line: String): List<String> =
     line.trim().trim('|').split('|').map { it.trim() }
+
+/**
+ * 段落内联解析缓存。
+ *
+ * 流式输出时整段文本每次都会变，但**大多数段落其实没变**；`inline()` 里的正则与
+ * AnnotatedString 构建是这条链路上最贵的一步，按段落文本缓存后，
+ * 一次更新只有「正在增长的那一段」需要重新解析，其余段落直接复用。
+ * AnnotatedString 结构相等，Compose 也会跳过对应 Text 的重测量。
+ */
+@Composable
+private fun rememberInline(
+    text: String,
+    linksClickable: Boolean,
+    codeColor: Color,
+    citeBg: Color,
+    citeColor: Color,
+): AnnotatedString {
+    val linkColor = MaterialTheme.colorScheme.primary
+    return remember(text, linksClickable, linkColor, codeColor, citeBg, citeColor) {
+        inline(text, linkColor, linksClickable, codeColor, citeBg, citeColor)
+    }
+}
 
 private fun inline(
     text: String,

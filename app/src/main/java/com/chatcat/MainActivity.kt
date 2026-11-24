@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -14,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chatcat.data.remote.ApiException
@@ -45,6 +47,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 显式开启 edge-to-edge：让「键盘高度」只有一处来源（WindowInsets.ime），
+        // 由页面自己 imePadding 消化。否则部分机型/系统版本会「窗口先被 resize 一次、
+        // ime insets 再报一次」，输入框被顶两次。
+        enableEdgeToEdge()
         val container = (application as ChatCatApp).container
         incomingFlow.value = parseIncoming(intent)
 
@@ -95,7 +101,29 @@ class MainActivity : ComponentActivity() {
             }
 
             ChatCatTheme(darkTheme = darkTheme, fontScale = state.settings.fontScale) {
+                // edge-to-edge 之后状态栏/导航栏图标要跟着应用内主题走，
+                // 否则「应用深色 + 系统浅色」时图标会看不见。
+                val rootView = androidx.compose.ui.platform.LocalView.current
+                androidx.compose.runtime.SideEffect {
+                    androidx.core.view.WindowCompat.getInsetsController(window, rootView).apply {
+                        isAppearanceLightStatusBars = !darkTheme
+                        isAppearanceLightNavigationBars = !darkTheme
+                    }
+                }
+                // 流式揭示节奏（开发者模式可调）
+                androidx.compose.runtime.CompositionLocalProvider(
+                    com.chatcat.ui.components.LocalStreamTuning provides
+                        com.chatcat.ui.components.StreamTuning(
+                            maxStep = state.settings.revealMaxStep,
+                            drainFrames = state.settings.revealDrainFrames,
+                        ),
+                ) {
+                androidx.compose.runtime.CompositionLocalProvider(
+                    com.chatcat.ui.chat.LocalThinkingPanelHeight provides
+                        state.settings.revealPanelHeight.dp,
+                ) {
                 var showSettings by rememberSaveable { mutableStateOf(false) }
+                var showPreview by rememberSaveable { mutableStateOf(false) }
                 var reopenDrawer by remember { mutableStateOf(false) }
 
                 // 导入引导页由 ViewModel 承载：进程/页面重建后也要能重新显示出来
@@ -106,8 +134,13 @@ class MainActivity : ComponentActivity() {
                 // 首次填 Key 前必须先同意协议：进入配置页时就把协议挡在前面，
                 // 同意之后才渲染配置页（也才会去读剪贴板，避免「粘贴→被拦住→再粘贴」）。
                 val needsTerms = state.settings.termsVersion < com.chatcat.ui.legal.TERMS_VERSION
-                // 页面优先级：协议 > 余额 > API 配置 > 设置 > 对话；均为二级页，符合「无弹窗」准则。
+                // 页面优先级：协议 > 余额 > API 配置 > 预览 > 设置 > 对话；均为二级页，符合「无弹窗」准则。
                 when {
+                    showPreview -> com.chatcat.ui.preview.PreviewScreen(
+                        thinkingDisplay = state.settings.thinkingDisplay,
+                        onBack = { showPreview = false },
+                    )
+
                     state.termsGateOpen || (needsTerms && showSetup) -> com.chatcat.ui.legal.TermsGatePage(
                         onAccept = {
                             viewModel.acceptTerms()
@@ -169,6 +202,9 @@ class MainActivity : ComponentActivity() {
                         avatarUri = state.avatarUri,
                         avatarVersion = state.avatarVersion,
                         onSetAvatar = viewModel::setAvatar,
+                        onSetDevMode = viewModel::setDevMode,
+                        onRevealTuning = viewModel::setRevealTuning,
+                        onOpenPreview = { showPreview = true },
                         archiveNotice = state.archiveNotice,
                         importPreview = state.importPreview,
                         usageOverviewOpen = state.usageOverviewOpen,
@@ -260,6 +296,8 @@ class MainActivity : ComponentActivity() {
                         onDrawerOpened = { reopenDrawer = false },
                     )
                 }
+                }   // CompositionLocalProvider(LocalThinkingPanelHeight)
+                }   // CompositionLocalProvider(LocalStreamTuning)
             }
         }
     }

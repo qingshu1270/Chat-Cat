@@ -217,6 +217,9 @@ data class ChatUiState(
         }
 }
 
+/** 流式状态合并间隔（毫秒）：只用于合并高频 token，上屏节奏由渲染层自适应控制 */
+private const val STREAM_PUBLISH_MS = 50L
+
 class ChatViewModel(
     app: Application,
     private val container: AppContainer,
@@ -234,6 +237,7 @@ class ChatViewModel(
     private var sessionJob: Job? = null
     private var sendJob: Job? = null
     private var lastPublish = 0L
+
     private var pendingImportUri: Uri? = null
     /** 链接下载得到的临时包：确认或取消导入后删除 */
     private var pendingLinkFile: File? = null
@@ -1048,6 +1052,24 @@ class ChatViewModel(
 
     fun setTheme(value: String) {
         viewModelScope.launch { settingsStore.update { it.copy(theme = value) } }
+    }
+
+    /** 开发者模式开关（「关于」页作者栏连点 9 次） */
+    fun setDevMode(on: Boolean) {
+        viewModelScope.launch { settingsStore.update { it.copy(devMode = on) } }
+    }
+
+    /** 流式揭示节奏 + 限高高度（开发者模式可调）：单帧上限 1..16、追平帧数 8..40、限高 100..320dp */
+    fun setRevealTuning(maxStep: Int, drainFrames: Int, panelHeight: Int) {
+        viewModelScope.launch {
+            settingsStore.update {
+                it.copy(
+                    revealMaxStep = maxStep.coerceIn(1, 16),
+                    revealDrainFrames = drainFrames.coerceIn(8, 40),
+                    revealPanelHeight = panelHeight.coerceIn(100, 320),
+                )
+            }
+        }
     }
 
     /** 思考链展示方式（个性化）：limited / collapsed / full */
@@ -1923,11 +1945,15 @@ class ChatViewModel(
         publish(assistantId, blocks, startedAt)
     }
 
-    /** 50 ms 合并一次 UI，避免每个 token 触发重组。 */
+    /**
+     * 流式 UI 刷新：简单节流（[STREAM_PUBLISH_MS]）合并高频 token。
+     *
+     * 上屏节奏交给 MarkdownText 的自适应节流（StreamPacing.kt），这里只负责别把状态写太激进。
+     */
     private fun publish(assistantId: String?, blocks: List<UiBlock>, startedAt: Long) {
         val id = assistantId ?: return
         val now = SystemClock.uptimeMillis()
-        if (now - lastPublish < 50) return
+        if (now - lastPublish < STREAM_PUBLISH_MS) return
         lastPublish = now
         _state.update {
             it.copy(
